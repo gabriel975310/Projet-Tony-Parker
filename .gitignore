@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.cache_projet/
+.test_2025.yaml
+.test_config.yaml
+config.local.yaml
+.venv/
+venv/
+.gstack/
+.pytest_cache/
+.env
+setenv.ps1
+setenv.sh
+NOTES_LOCALES.md

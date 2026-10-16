@@ -1,0 +1,84 @@
+sleeper:
+  # Quem e voce e qual a liga NAO ficam no repo (ele e publico): vem dos
+  # secrets SLEEPER_USERNAME e SLEEPER_LEAGUE_ID no Actions, ou do
+  # config.local.yaml (fora do git) quando roda no seu computador.
+  username: ""                   # username do Sleeper (nao o display name)
+  league_id: ""                  # vazio = auto-detecta a liga de NBA do username
+  season: 2026                   # temporada 2026-27 (o Sleeper chama pelo ano de inicio)
+
+# Fuso das mensagens. Os jogos sao no horario americano, mas quem mexe no
+# app e voce: o horario de "trave ate" sai no seu relogio.
+fuso: "America/Sao_Paulo"
+
+# LOCK: travar ou esperar. Nao ha corte de valor: o bot compara o que voce
+# trava AGORA com o que a semana ainda deve render (o proprio jogador nos
+# proximos jogos, ou outro entrando no slot). Abaixo desta margem, em pontos,
+# a decisao vem marcada como "cara ou coroa".
+lock:
+  margem_duvida: 1.5
+
+# ESCALACAO DA NOITE: o bot so manda mensagem de troca quando ela ganha pelo
+# menos isso em valor esperado (pontos). Trocar nao custa nada, mas mensagem
+# de 0,2 ponto as 22h nao vale o celular vibrando.
+escalacao:
+  ganho_minimo: 0.5
+  # Quantos minutos antes do tip-off a mensagem tem que sair. Jogo da NBA
+  # tem status de ultima hora (GTD vira Out 30min antes): mais cedo que isso
+  # o aviso pode sair com informacao velha.
+  antecedencia_min: 90
+
+waivers:
+  # Ganho minimo pra sugerir um add, em pontos esperados NA SEMANA (o que o
+  # livre rende no slot menos o que voce perde com quem sai). Add na NBA nao
+  # queima prioridade (os livres sao instantaneos), so o jogador dispensado.
+  ganho_minimo: 2.0
+  # Quanto pesa o resto da temporada de quem voce dispensa. 1.0 = o bot
+  # cobra o valor inteiro de temporada do dispensado; 0 = so olha a semana.
+  peso_temporada: 1.0
+  never_drop: []                 # nomes exatos, ex: "Nikola Jokić"
+  # Claim de waiver (dispensado pela liga, ainda em waiver): ganho minimo no
+  # titular, em pontos por semana nas proximas `horizonte_semanas`. Mais alto
+  # que o do add porque o claim gasta a sua prioridade.
+  ganho_minimo_claim: 3.0
+  horizonte_semanas: 6
+
+trocas:
+  # Uma vez por semana no relatorio do dia (1 = segunda, 0 = domingo), ate o
+  # prazo de trocas da liga. Tambem roda na mao: python trocas.py --dry-run
+  dia_semana: 1
+  # Pontos por semana no titular, na media das proximas N semanas.
+  horizonte_semanas: 10
+  # A troca passa quando voce ganha pelo menos isso por semana e eles nao
+  # perdem mais que `perda_maxima` (pelo modelo do bot; o deles e outro).
+  # Chute declarado: ~4% do que um slot titular rende por semana.
+  ganho_minimo: 2.0
+  perda_maxima: 1.0
+  limite: 3                      # propostas, no maximo uma por time
+  nunca_trocar: []               # nomes exatos
+
+draft:
+  # Quantos jogadores listar no board.
+  limite: 25
+  # Comentario seu num jogador, que aparece embaixo dele no board. Nome
+  # exato como no Sleeper. Nao muda a ordem: so lembra o que o numero nao diz.
+  # Jogadores que aparecem sempre no fim do board (com a posicao deles no
+  # board inteiro), ate alguem pegar.
+  fixados: ["Trae Young", "Jalen Williams", "Ja Morant"]
+  notas:
+    "Jayson Tatum": >-
+      lesao isolada (Aquiles 2025), nao cronica: o bot conta ~81% das
+      semanas, ja descontado. FantasyPros pontos: #53
+    "Trae Young": >-
+      lesao isolada: o bot conta ~82% de saude (recalibrada em quem chega
+      saudavel). FantasyPros pontos: #28
+    "Jalen Williams": >-
+      lesao isolada (punho), mesmo caso do Trae: desconto ja medido.
+      FantasyPros pontos: #38
+    "Ja Morant": >-
+      o bot esta pessimista: o Sleeper projeta 17,2 pts/jogo e ele fez 20,6
+      em 2025 (talvez pelo time novo). Historico cronico, que o bot nao
+      pesa. Vale a aposta depois do pick ~100. FantasyPros pontos: #49
+
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"

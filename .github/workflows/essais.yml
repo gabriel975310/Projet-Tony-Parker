@@ -1,0 +1,25 @@
+name: essais
+
+# Roda no push, num workflow separado: teste falhando nao pode segurar a
+# escalacao da noite, que roda do mesmo jeito.
+
+on:
+  push:
+    branches: [master]
+    paths: ["**.py", "requirements*.txt", "*.json", "config*.yaml"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # Offline: liga montada na mao, sem rede nem cache.
+      - run: python -m pytest -q

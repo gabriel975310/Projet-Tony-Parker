@@ -1,0 +1,5 @@
+requests>=2.31
+PyYAML>=6.0
+# tzdata: zoneinfo precisa da base de fusos; no Linux vem do SO, mas o
+# pacote garante em qualquer runner
+tzdata

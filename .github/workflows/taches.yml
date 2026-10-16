@@ -1,0 +1,111 @@
+name: taches
+
+# Mesma arquitetura do bot da NFL: o cron so ACORDA o job, e o `--gate` de
+# cada runner decide se tem algo novo pra mandar. Quem le o horario do cron
+# pra escolher o que rodar perde mensagem quando o GitHub atrasa — e ele
+# atrasa (ate 59 minutos medidos, e um buraco de 10h em 29/09/2026).
+#
+# Na NBA o relogio aperta mais que na NFL, mas so de noite (horario dos
+# EUA): os jogos comecam entre 19h e 22h30 ET (23h-02h30 UTC no horario de
+# verao, uma hora depois no inverno), e e ai que GTD vira Out, que um jogo
+# acaba e outro ainda nao comecou, e que da tempo de pegar um livre pro
+# slot de quem foi mal. De 15 em 15 minutos nessa janela; de 30 em 30 no
+# resto do dia (noticia de lesao, relatorio das 10h BRT, jogo de tarde no
+# fim de semana); e nada de madrugada americana, quando nao acontece nada.
+#
+# Repo publico: minuto de Actions nao conta. Em repo privado isso sao ~54
+# disparos por dia, e o GitHub cobra cada um como pelo menos 1 minuto.
+
+on:
+  schedule:
+    # Minuto quebrado: o comeco da hora e o horario mais concorrido do
+    # agendador do GitHub, e o que mais atrasa.
+    - cron: "8,38 12-22 * * *"
+    - cron: "8,23,38,53 0-6,23 * * *"
+    # DRAFT: setembro e outubro, quando as ligas de NBA draftam. De 15 em 15
+    # minutos so como gatilho; quem garante a latencia e o `--watch`, que
+    # fica no ar olhando de minuto em minuto quando o seu pick esta perto.
+    - cron: "7,22,37,52 * * 9,10 *"
+  # Na mao: Actions → taches → Run workflow (ou `gh workflow run taches.yml`).
+  # E o gatilho de fora (cron-job.org), porque o agendador do GitHub some:
+  # `agendado` faz o papel dos dois primeiros crons, `vigia_draft` o do
+  # terceiro. Os dois passam pelo gate, entao disparo a mais nao duplica
+  # mensagem.
+  workflow_dispatch:
+    inputs:
+      comando:
+        description: "qual runner rodar agora (ignora o gate; `agendado` roda tudo COM gate)"
+        type: choice
+        default: run_escalacao
+        options: [run_escalacao, run_dia, run_draft, trocas, agendado, vigia_draft]
+      vigia:
+        description: "run_draft: minutos vigiando o draft (0 = um disparo so)"
+        default: "0"
+
+concurrency:
+  # O vigia do draft fica horas no ar; nao pode segurar a escalacao da noite.
+  group: taches-${{ (startsWith(github.event.schedule, '7,22,37,52') || github.event.inputs.comando == 'run_draft' || github.event.inputs.comando == 'vigia_draft') && 'draft' || 'jogo' }}
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ (github.event.inputs.vigia && github.event.inputs.vigia != '0') && 360 || ((startsWith(github.event.schedule, '7,22,37,52') || github.event.inputs.comando == 'vigia_draft') && 60 || 15) }}
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SLEEPER_USERNAME: ${{ secrets.SLEEPER_USERNAME }}
+      SLEEPER_LEAGUE_ID: ${{ secrets.SLEEPER_LEAGUE_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: dependencias
+        run: pip install -r requirements-runtime.txt
+
+      # Logs jogo a jogo (semana fechada nao muda, fica pra sempre), dump de
+      # jogadores, e os arquivos de "ja avisei" e das decisoes de trava — que
+      # e o que faz o bot ler um placar provisorio como provisorio.
+      - name: cache de dados
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache_projet
+          key: cache-projet-${{ github.run_id }}
+          restore-keys: cache-projet-
+
+      - name: rodar
+        run: |
+          set -e
+          MANUAL="${{ github.event.inputs.comando }}"
+          VIGIA="${{ github.event.inputs.vigia }}"
+          if [ "$MANUAL" = "vigia_draft" ]; then
+            python run_draft.py --gate --watch 50 --so-perto
+            exit 0
+          fi
+          if [ -n "$MANUAL" ] && [ "$MANUAL" != "agendado" ]; then
+            if [ "$MANUAL" = "run_draft" ] && [ -n "$VIGIA" ] && [ "$VIGIA" != "0" ]; then
+              python run_draft.py --gate --watch "$VIGIA"
+            else
+              python "$MANUAL.py"
+            fi
+            exit 0
+          fi
+          # Toda entrega roda todos os runners; o gate de cada um decide.
+          # Um que quebra nao cala os outros, mas deixa o job vermelho no fim
+          # (com `|| true` puro, crash e silencio ficariam iguais).
+          FALHOU=""
+          python run_escalacao.py --gate || FALHOU="$FALHOU run_escalacao"
+          python run_dia.py --gate || FALHOU="$FALHOU run_dia"
+          case "${{ github.event.schedule }}" in
+            "7,22,37,52 "*)
+              python run_draft.py --gate --watch 50 --so-perto ;;
+          esac
+          if [ -n "$FALHOU" ]; then
+            echo "::error::runner quebrou:$FALHOU"
+            exit 1
+          fi

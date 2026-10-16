@@ -1,0 +1,3 @@
+sleeper:
+  username: ""     # o seu username do Sleeper (o do @)
+  league_id: ""    # o id da liga (vazio = auto-detecta a liga de NBA do username)

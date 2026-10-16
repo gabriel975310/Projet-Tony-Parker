@@ -1,0 +1,5 @@
+requests>=2.31
+PyYAML>=6.0
+# zoneinfo usa a base de fusos do SO; no Windows vem do pacote tzdata
+tzdata; platform_system == "Windows"
+pytest>=8
