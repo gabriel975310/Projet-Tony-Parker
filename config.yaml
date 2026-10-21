@@ -36,6 +36,11 @@ escalacao:
   # tem status de ultima hora (GTD vira Out 30min antes): mais cedo que isso
   # o aviso pode sair com informacao velha.
   antecedencia_min: 90
+  # Escalacao do dia mexe o minimo: quem joga hoje fica no slot em que ja
+  # esta, e quem entra pega o slot de quem nao joga. Remanejar mais (ex.: o
+  # NAW do UTIL pro SG) so se render pelo menos isso a mais, em pontos. O
+  # slot certo de cada um se escolhe na hora de travar (lock.mover_slot).
+  ganho_minimo_remanejar: 2.0
 
 waivers:
   # Ganho minimo pra sugerir um add, em pontos esperados NA SEMANA (o que o

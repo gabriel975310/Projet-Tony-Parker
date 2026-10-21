@@ -356,6 +356,20 @@ def test_placar_ao_vivo_nao_e_trava(monkeypatch):
     assert semana.estado(ctx).abertos == [0, 1]
 
 
+def test_escalacao_mexe_o_minimo():
+    from lockin import _menos_mexidas
+    slots = ["SG", "G", "UTIL"]
+    pos = {"naw": ["PG", "SG"], "gid": ["PG", "SG"], "cas": ["SG"]}
+    atual = ["cas", "gid", "naw"]          # Castle nao joga hoje
+    otimo = {0: "naw", 1: "gid", 2: None}  # o otimo tira o NAW do UTIL pro SG
+    otimo = {i: p for i, p in otimo.items() if p}
+    g = lambda p, i: {(("naw"), 0): 3.0, ("naw", 2): 2.5}.get((p, i), 1.0)
+    calmo = _menos_mexidas(slots, otimo, {}, atual, lambda p: pos[p], g, remanejar=2.0)
+    assert calmo == {1: "gid", 2: "naw"}
+    # ganho grande compensa remanejar
+    assert _menos_mexidas(slots, otimo, {}, atual, lambda p: pos[p], g, remanejar=0.1) == otimo
+
+
 def test_voto_da_enquete_vira_resposta(monkeypatch, tmp_path):
     import enquete
     monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")

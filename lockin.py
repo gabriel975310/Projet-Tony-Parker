@@ -408,7 +408,7 @@ class Escalacao:
 
 def escalar_dia(slots: list[str], abertos: list[int], congelados: dict[int, str],
                 hoje: dict[str, Opcao], futuro: dict[str, list[Opcao]], posicoes,
-                atual: list[str | None]) -> Escalacao:
+                atual: list[str | None], remanejar: float | None = None) -> Escalacao:
     """Quem ocupa cada slot aberto HOJE.
 
     So joga hoje quem tem jogo hoje que ainda nao comecou (`hoje`). O resto
@@ -418,6 +418,12 @@ def escalar_dia(slots: list[str], abertos: list[int], congelados: dict[int, str]
 
     `congelados` sao slots abertos cujo ocupante ja comecou o jogo de hoje:
     ninguem mexe neles ate amanha.
+
+    `remanejar`: com ele, os mesmos jogadores de hoje vao pros slots que
+    menos mexem na escalacao atual (quem ja esta num slot fica; quem entra
+    pega o slot de quem nao joga), e o remanejamento otimo so vale se render
+    pelo menos isso a mais. O slot certo pra cada um se escolhe na hora de
+    travar (`decidir_travas`, mover); de manha e ruido do plano.
     """
     pl = Planejador(slots, futuro, posicoes)
     livres = [i for i in abertos if i not in congelados]
@@ -438,6 +444,8 @@ def escalar_dia(slots: list[str], abertos: list[int], congelados: dict[int, str]
 
     hoje_sl = {i: p for i, p in enumerate(assign) if p and i in livres}
     hoje_sl = _tarde_no_flexivel(slots, hoje_sl, hoje, posicoes, ganho)
+    if remanejar is not None and hoje_sl:
+        hoje_sl = _menos_mexidas(slots, hoje_sl, congelados, atual, posicoes, ganho, remanejar)
 
     # O resto dos slots: quem ja estava fica, se nao foi usado em outro lugar.
     usados = set(hoje_sl.values()) | set(congelados.values())
@@ -460,6 +468,32 @@ def escalar_dia(slots: list[str], abertos: list[int], congelados: dict[int, str]
     return Escalacao(lineup, hoje_sl, g,
                      {i: lim.get((p, i), pl.limiar(abertos, i, p)) for i, p in hoje_sl.items()},
                      base + sum(g.values()))
+
+
+def _menos_mexidas(slots, hoje_sl: dict[int, str], congelados: dict[int, str],
+                   atual: list[str | None], posicoes, ganho, remanejar: float) -> dict[int, str]:
+    """Os mesmos jogadores de `hoje_sl`, nos slots que menos mexem no app.
+
+    Ficar no proprio slot vale 2; pegar o slot de quem nao joga hoje (ou
+    vazio) vale 1, uma troca so; tirar outro de quem joga hoje vale 0, que
+    obriga a mexer nele tambem. Empate vai pro maior ganho.
+    """
+    jogam = set(hoje_sl.values())
+
+    def custo(p, i):
+        g = ganho(p, i)
+        if g is None:
+            return None
+        a = atual[i] if i < len(atual) else None
+        return 10 + (2 if a == p else 1 if a not in jogam else 0) + 1e-3 * g
+
+    asg, _ = otimizar(slots, list(jogam), custo, posicoes, fixos=dict(congelados))
+    quieto = {i: p for i, p in enumerate(asg) if p and i not in congelados}
+    if set(quieto.values()) != jogam:
+        return hoje_sl
+    otimo = sum(ganho(p, i) or 0.0 for i, p in hoje_sl.items())
+    calmo = sum(ganho(p, i) or 0.0 for i, p in quieto.items())
+    return quieto if otimo - calmo < remanejar else hoje_sl
 
 
 def _tarde_no_flexivel(slots, hoje_sl: dict[int, str], hoje: dict[str, Opcao],

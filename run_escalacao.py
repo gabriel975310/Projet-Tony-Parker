@@ -32,7 +32,7 @@ from datetime import timedelta
 from agenda import DURACAO
 from clients import CACHE, esc
 from lineup import cabe, diff
-from lockin import chance_troca, decidir_travas, escalar_dia, valor_bilhetes
+from lockin import Planejador, chance_troca, decidir_travas, escalar_dia, valor_bilhetes
 from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_each_league
 import enquete
 from report import bloco, n, rodape, secao, titulo
@@ -92,30 +92,32 @@ def travas(ctx, est):
                           ganho_mover=float(lk.get("ganho_minimo_mover", 1.0)))
 
 
-def _quem_segura(ctx, est, i: int, pid: str, e=None) -> tuple[str, str]:
-    """(quem entra no slot i hoje, quem mais do banco cabe nele), pra
-    explicar o PASSE. Quem a escalacao de hoje pos em OUTRO slot nao conta:
-    nao da pra ele estar nos dois."""
-    lineup = list(e.lineup) if e else list(est.atual)
-    hoje = lineup[i] if i < len(lineup) and lineup[i] != pid else None
-    outros_slots = {p for k, p in enumerate(lineup) if p and k != i}
-    nomes = []
-    for p in est.elenco:
-        if (p == pid or p == hoje or p in est.usados() or p in outros_slots
-                or not cabe(ctx.posicoes(p), est.slots[i])):
+def quem_ocupa(ctx, est, decs) -> dict[str, str]:
+    """{quem PASSA: quem o plano da semana poe no slot dele}.
+
+    Nao e todo mundo que cabe no slot: o plano da cada jogador ao slot em
+    que ele mais rende, entao quem provavelmente trava em outro lugar (o
+    Giddey no G, o Acuff no UTIL) nao aparece como reserva do SG.
+    """
+    fechados = {t.j for t in decs if t.travar} | {t.i for t in decs if t.segurar}
+    fora = frozenset(t.pid for t in decs if t.travar or t.segurar)
+    ab = [x for x in est.abertos if x not in fechados]
+    pl = Planejador(est.slots, opcoes_futuras(ctx, est, est.elenco), ctx.posicoes)
+    out = {}
+    for t in decs:
+        if t.travar or t.segurar or t.i not in ab:
             continue
-        prox = est.restantes(p, ctx.agora)
-        if prox:
-            nomes.append((prox[0].inicio, f"{ctx.name(p).split()[-1]} {ctx.hora(prox[0].inicio, '%a')}"))
-    nomes.sort()
-    entra = ""
-    if hoje:
-        prox = est.restantes(hoje, ctx.agora)
-        entra = ctx.name(hoje) + (f" ({ctx.hora(prox[0].inicio, '%a %H:%M')})" if prox else "")
-    return entra, ", ".join(x for _, x in nomes[:4])
+        grupo = pl.plano(ab, fora | {t.pid}).grupos.get(t.i) or []
+        nomes = []
+        for p in grupo:
+            prox = est.restantes(p, ctx.agora)
+            if prox:
+                nomes.append((prox[0].inicio, f"{ctx.name(p).split()[-1]} {ctx.hora(prox[0].inicio, '%a')}"))
+        out[t.pid] = ", ".join(x for _, x in sorted(nomes))
+    return out
 
 
-def linhas_travas(ctx, est, decs, e=None) -> list[str]:
+def linhas_travas(ctx, est, decs, ocupa: dict[str, str] | None = None) -> list[str]:
     L = []
     for t in decs:
         nome = esc(ctx.name(t.pid))
@@ -147,11 +149,9 @@ def linhas_travas(ctx, est, decs, e=None) -> list[str]:
         else:
             L.append(f"⏭ <b>PASSE {nome}</b> no <code>{t.slot}</code>")
             L.append(f"      🎯 {n(t.pontos)} pts · o slot ainda rende <b>~{n(t.limiar)}</b>")
-            entra, banco = _quem_segura(ctx, est, t.i, t.pid, e)
-            if entra:
-                L.append(f"      <i>👤 entra no lugar: {esc(entra)}</i>")
-            if banco:
-                L.append(f"      <i>👥 no banco, também cabem no {t.slot}: {esc(banco)}</i>")
+            quem = (ocupa or {}).get(t.pid)
+            if quem:
+                L.append(f"      <i>👥 quem deve ocupar o {t.slot}: {esc(quem)}</i>")
         L.append(f"      <i>⏰ {esc(prazo)}" + (" · 🪙 cara ou coroa" if duvida else "") + "</i>")
         L.append("")
     return L
@@ -176,9 +176,12 @@ def escalacao_hoje(ctx, est, decs):
     # quem acabou de travar ou esta segurado nao fica onde estava por inercia
     atual = [None if p in novos else p for p in est.atual]
 
+    remanejar = float((ctx.cfg.get("escalacao") or {}).get("ganho_minimo_remanejar", 2.0))
+
     def escala(parados: dict[int, str]):
         ab = [i for i in base if i not in parados]
-        return escalar_dia(est.slots, ab, congelados, hoje, futuro, ctx.posicoes, atual)
+        return escalar_dia(est.slots, ab, congelados, hoje, futuro, ctx.posicoes, atual,
+                           remanejar=remanejar)
 
     parados = estacionar(ctx, est, segura, base, congelados, escala)
     abertos = [i for i in base if i not in parados]
@@ -415,10 +418,11 @@ def linhas_trocas_rodada(ctx, est, e, hoje) -> list[str]:
 
 
 def linhas_folga(ctx, est, e, hoje) -> list[str]:
-    """Quem nao joga hoje: titulares de slot aberto e banco, com o proximo jogo."""
+    """Quem nao joga hoje: titulares de slot aberto e banco, com os dias que
+    ainda jogam na semana. Travado nao entra: o slot dele ja acabou."""
     def prox(p):
         js = [j for j in est.restantes(p, ctx.agora) if j.data > est.hoje]
-        return ctx.hora(js[0].inicio, "%a") if js else "sem jogo na semana"
+        return ", ".join(ctx.hora(j.inicio, "%a") for j in js) or "sem jogo na semana"
 
     escalados = {p for p in e.lineup if p} | est.usados()
     tit = [f"<code>{est.slots[i]}</code> {esc(ctx.name(e.lineup[i]))} <i>({prox(e.lineup[i])})</i>"
@@ -693,7 +697,7 @@ def main_with(args, config=None) -> int:
     L += painel(ctx, est)
     if novos_trava:
         L += secao("🔐", "Travar ou passar")
-        L += linhas_travas(ctx, est, [t for t, _, _ in novos_trava], e)
+        L += linhas_travas(ctx, est, [t for t, _, _ in novos_trava], quem_ocupa(ctx, est, decs))
     if manda_esc:
         L += linhas_escalacao(ctx, est, e, mud, ganho, hoje)
     if e.hoje and (manda_esc or not gate):
