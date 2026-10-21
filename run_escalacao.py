@@ -92,20 +92,30 @@ def travas(ctx, est):
                           ganho_mover=float(lk.get("ganho_minimo_mover", 1.0)))
 
 
-def _quem_segura(ctx, est, i: int, pid: str) -> str:
-    """Quem mais pode ocupar o slot i esta semana (pra explicar o PASSE)."""
+def _quem_segura(ctx, est, i: int, pid: str, e=None) -> tuple[str, str]:
+    """(quem entra no slot i hoje, quem mais do banco cabe nele), pra
+    explicar o PASSE. Quem a escalacao de hoje pos em OUTRO slot nao conta:
+    nao da pra ele estar nos dois."""
+    lineup = list(e.lineup) if e else list(est.atual)
+    hoje = lineup[i] if i < len(lineup) and lineup[i] != pid else None
+    outros_slots = {p for k, p in enumerate(lineup) if p and k != i}
     nomes = []
     for p in est.elenco:
-        if p in est.usados() or not cabe(ctx.posicoes(p), est.slots[i]):
+        if (p == pid or p == hoje or p in est.usados() or p in outros_slots
+                or not cabe(ctx.posicoes(p), est.slots[i])):
             continue
         prox = est.restantes(p, ctx.agora)
         if prox:
             nomes.append((prox[0].inicio, f"{ctx.name(p).split()[-1]} {ctx.hora(prox[0].inicio, '%a')}"))
     nomes.sort()
-    return ", ".join(x for _, x in nomes[:4])
+    entra = ""
+    if hoje:
+        prox = est.restantes(hoje, ctx.agora)
+        entra = ctx.name(hoje) + (f" ({ctx.hora(prox[0].inicio, '%a %H:%M')})" if prox else "")
+    return entra, ", ".join(x for _, x in nomes[:4])
 
 
-def linhas_travas(ctx, est, decs) -> list[str]:
+def linhas_travas(ctx, est, decs, e=None) -> list[str]:
     L = []
     for t in decs:
         nome = esc(ctx.name(t.pid))
@@ -137,9 +147,11 @@ def linhas_travas(ctx, est, decs) -> list[str]:
         else:
             L.append(f"⏭ <b>PASSE {nome}</b> no <code>{t.slot}</code>")
             L.append(f"      🎯 {n(t.pontos)} pts · o slot ainda rende <b>~{n(t.limiar)}</b>")
-            quem = _quem_segura(ctx, est, t.i, t.pid)
-            if quem:
-                L.append(f"      <i>👥 quem ainda pode ocupar: {esc(quem)}</i>")
+            entra, banco = _quem_segura(ctx, est, t.i, t.pid, e)
+            if entra:
+                L.append(f"      <i>👤 entra no lugar: {esc(entra)}</i>")
+            if banco:
+                L.append(f"      <i>👥 no banco, também cabem no {t.slot}: {esc(banco)}</i>")
         L.append(f"      <i>⏰ {esc(prazo)}" + (" · 🪙 cara ou coroa" if duvida else "") + "</i>")
         L.append("")
     return L
@@ -681,7 +693,7 @@ def main_with(args, config=None) -> int:
     L += painel(ctx, est)
     if novos_trava:
         L += secao("🔐", "Travar ou passar")
-        L += linhas_travas(ctx, est, [t for t, _, _ in novos_trava])
+        L += linhas_travas(ctx, est, [t for t, _, _ in novos_trava], e)
     if manda_esc:
         L += linhas_escalacao(ctx, est, e, mud, ganho, hoje)
     if e.hoje and (manda_esc or not gate):
