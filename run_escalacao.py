@@ -371,7 +371,7 @@ def linhas_bilhetes(ctx, est, e, hoje) -> list[str]:
                  f" · <i>{ctx.hora(o.inicio, '%H:%M')}</i>")
         if e.limiar[i] >= 0.5:
             L.append(f"      🎯 trave se fizer <b>{n(e.limiar[i])}+</b> <i>(média {n(o.mu)})</i>")
-            L.append(f"      📉 <i>{round(100 * chance_troca(o, e.limiar[i]))}% de chance de não chegar</i>")
+            L.append(f"      📈 <i>{round(100 * (1 - chance_troca(o, e.limiar[i])))}% de chance de chegar</i>")
         else:
             L.append(f"      🎯 <b>trave o que vier</b> <i>(última chance do slot; média {n(o.mu)})</i>")
         jogo = next((j for j in est.jogos.get(p, []) if j.data == o.dia), None)
