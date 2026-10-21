@@ -45,7 +45,7 @@ travado (o confiavel, o que joga cedo) no slot mais restrito.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from math import erf, exp, pi, sqrt
 
@@ -218,44 +218,179 @@ class Planejador:
 # Decisao de travar
 # ==========================================================================
 @dataclass
+class Espera:
+    """O que vale segurar o placar travavel em vez de travar ja.
+
+    Segurar custa o mesmo que travar (o slot fica parado com ele) e guarda
+    a escolha: depois dos jogos de outros, trava ele, trava em outro slot,
+    ou solta o slot se o resto da semana pedir.
+    """
+    ganho: float               # valor esperado de esperar sobre travar ja no slot atual
+    ate: datetime | None       # inicio do ultimo jogo que informa (decide depois dele)
+    p_trava: float             # chance de, nesse ponto, ainda travar ele
+
+
+@dataclass
 class Trava:
     i: int
     slot: str
     pid: str
     pontos: float
-    limiar: float
+    limiar: float              # no slot de destino
     travar: bool
+    destino: int | None = None          # onde travar (None = onde ele esta)
+    limiar_atual: float | None = None   # no slot onde ele esta
+    segurar: bool = False
+    espera: Espera | None = None
+    parada: int | None = None           # segurado: slot onde fica (a escalacao escolhe)
 
     @property
     def margem(self) -> float:
         return self.pontos - self.limiar
 
+    @property
+    def j(self) -> int:
+        return self.i if self.destino is None else self.destino
+
+    @property
+    def mover(self) -> bool:
+        return self.j != self.i
+
 
 def decidir_travas(slots, abertos, futuro: dict[str, list[Opcao]], posicoes,
-                   candidatos: list[tuple[int, str, float]]) -> list[Trava]:
+                   candidatos: list[tuple[int, str, float]], mover: bool = True,
+                   esperar: bool = False, ganho_espera: float = 0.5,
+                   ganho_mover: float = 1.0, n_sim: int = 200) -> list[Trava]:
     """Decide cada (slot, jogador, placar) que pode ser travado agora.
 
     Varios na mesma noite interagem: travar o primeiro fecha um slot e muda
     o limiar do segundo. Resolve em sequencia, sempre pela maior margem.
+
+    EM QUAL SLOT. Com `mover`, o placar pode ser travado em qualquer slot
+    aberto em que ele cabe, nao so onde esta: o melhor e o de MENOR limiar,
+    o que o resto da semana menos sente (o C, se sobra pivo; o UTIL, se
+    ninguem mais precisa dele). Slot de outro candidato da noite fica fora.
+    So muda de slot se ganhar `ganho_mover`: a escalacao do dia ja poe cada
+    um no slot certo, e diferenca menor e ruido do plano (backtest 2025:
+    escolher o slot sem margem nao rendeu nada).
+
+    SEGURAR. Com `esperar`, quem ja passou do limiar pode esperar: o placar
+    vale ate o proximo jogo dele, e jogos de outros antes disso podem mudar
+    a conta (outro explode e fecha o UTIL; o G vira o slot que o resto da
+    semana disputa). Segurar custa o mesmo que travar — o slot fica parado
+    com ele —, entao so ganha. `simular_espera` mede quanto; se passa de
+    `ganho_espera`, segura e decide depois. Abaixo do limiar nao segura:
+    parar o slot como rede de seguranca perdeu no backtest de 2025.
     """
     pl = Planejador(slots, futuro, posicoes)
     ab = list(abertos)
     fora: frozenset = frozenset()
     pend = list(candidatos)
     out: list[Trava] = []
+
+    def destinos(i, pid, ab, ocupados):
+        return [j for j in ab if j == i or (mover and j not in ocupados
+                                            and cabe(posicoes(pid), slots[j]))]
+
     while pend:
         avals = []
         for (i, pid, pts) in pend:
-            lim = pl.limiar(ab, i, pid, fora)
-            avals.append((pts - lim, i, pid, pts, lim))
+            ocupados = {c[0] for c in pend if c[1] != pid}
+            lims = {j: pl.limiar(ab, j, pid, fora) for j in destinos(i, pid, ab, ocupados)}
+            # empate fica onde esta: mover e um passo a mais no app
+            j = min(lims, key=lambda x: (round(lims[x], 2), x != i))
+            if lims[i] - lims[j] < ganho_mover:
+                j = i
+            avals.append((pts - lims[j], i, pid, pts, j, lims[j], lims[i]))
         avals.sort(key=lambda a: -a[0])
-        m, i, pid, pts, lim = avals[0]
-        out.append(Trava(i, slots[i], pid, pts, lim, m >= 0))
-        pend = [c for c in pend if c[0] != i]
+        m, i, pid, pts, j, lim, lim_i = avals[0]
+        out.append(Trava(i, slots[i], pid, pts, lim, m >= 0,
+                         destino=j if j != i else None, limiar_atual=lim_i))
+        pend = [c for c in pend if c[1] != pid]
         if m >= 0:
-            ab = [x for x in ab if x != i]
+            ab = [x for x in ab if x != j]
             fora = fora | {pid}
+
+    if esperar:
+        for t in out:
+            if not t.travar:
+                continue
+            # o resto da noite como decidido; so este volta pra mesa
+            esp = simular_espera(slots, sorted(set(ab) | {t.j}), t.i, t.pid, t.pontos,
+                                 futuro, posicoes, fora - {t.pid}, mover, n_sim)
+            t.espera = esp
+            # relativo a travar ja onde ele esta; mover agora ja ganharia isto
+            mover_ja = t.limiar_atual - t.limiar
+            if esp.ate is not None and esp.ganho > mover_ja + ganho_espera:
+                t.travar, t.segurar = False, True
     return out
+
+
+def simular_espera(slots, abertos, i: int, pid: str, pts: float,
+                   futuro: dict[str, list[Opcao]], posicoes, fora: frozenset = frozenset(),
+                   mover: bool = True, n: int = 200, seed: int = 7) -> Espera:
+    """Valor de segurar `pid` (placar `pts`, no slot i) e decidir depois.
+
+    O prazo e o proximo jogo dele (sem proximo, o fim da semana). Ate la,
+    o slot i fica parado com ele, como se travado; os outros slots seguem a
+    escalacao do bot dia a dia, sorteando os placares, e travam quando
+    passam do limiar. Em cada ponto de decisao (fim de um dia com jogo que
+    informa) o melhor entre travar em i, travar em outro slot ou soltar i
+    e comparado com travar em i. O ganho e o do melhor ponto FIXO — o bot
+    reavalia de hora em hora, entao o valor real e pelo menos esse.
+    """
+    import random
+
+    proximo = min((o.dia for o in futuro.get(pid, [])), default=None)
+    outros = {p: v for p, v in futuro.items() if p != pid and p not in fora and v}
+    dias = sorted({o.dia for v in outros.values() for o in v
+                   if proximo is None or o.dia < proximo})
+    if not dias or i not in abertos:
+        return Espera(0.0, None, 1.0)
+
+    memo_esc: dict = {}
+    memo_dec: dict = {}
+
+    def escala(k, ab, fo):
+        if (k, ab, fo) not in memo_esc:
+            d = dias[k]
+            hoje = {p: o for p, v in outros.items() if p not in fo for o in v if o.dia == d}
+            fut = {p: [o for o in v if o.dia > d] for p, v in outros.items() if p not in fo}
+            e = escalar_dia(slots, list(ab), {}, hoje, fut, posicoes, [None] * len(slots))
+            memo_esc[(k, ab, fo)] = [(j, hoje[p], e.limiar[j]) for j, p in e.hoje.items()]
+        return memo_esc[(k, ab, fo)]
+
+    def decide(k, ab, fo):
+        """(ganho sobre travar em i, travou ele) depois dos jogos do dia k."""
+        if (k, ab, fo) not in memo_dec:
+            ops = {p: [o for o in v if o.dia > dias[k]] for p, v in futuro.items()
+                   if p not in fo and p not in fora}
+            pl = Planejador(slots, ops, posicoes)
+            abi = sorted(set(ab) | {i})
+            solta = pl.plano(abi, fo).valor
+            trava = {j: pts + pl.plano([x for x in abi if x != j], fo | {pid}).valor
+                     for j in abi if j == i or (mover and cabe(posicoes(pid), slots[j]))}
+            melhor = max(trava.values())
+            memo_dec[(k, ab, fo)] = (max(solta, melhor) - trava[i], melhor >= solta)
+        return memo_dec[(k, ab, fo)]
+
+    rng = random.Random(seed)
+    ganho = [0.0] * len(dias)
+    trava = [0] * len(dias)
+    ab0 = tuple(x for x in abertos if x != i)
+    for _ in range(n):
+        ab, fo = ab0, frozenset()
+        for k in range(len(dias)):
+            for j, o, lim in escala(k, ab, fo):
+                if rng.random() < o.p and rng.gauss(o.mu, o.sd) >= lim:
+                    ab = tuple(x for x in ab if x != j)
+                    fo = fo | {o.pid}
+            g, tr = decide(k, ab, fo)
+            ganho[k] += g
+            trava[k] += tr
+    k = max(range(len(dias)), key=lambda x: ganho[x])
+    ultimo = max(o.inicio for v in outros.values() for o in v if o.dia == dias[k])
+    return Espera(ganho[k] / n, ultimo, trava[k] / n)
 
 
 # ==========================================================================
@@ -268,6 +403,7 @@ class Escalacao:
     ganho: dict[int, float]           # valor esperado de cada bilhete
     limiar: dict[int, float]          # placar que manda travar
     valor_semana: float
+    segurados: dict[int, str] = field(default_factory=dict)   # slot -> quem esta parado nele
 
 
 def escalar_dia(slots: list[str], abertos: list[int], congelados: dict[int, str],

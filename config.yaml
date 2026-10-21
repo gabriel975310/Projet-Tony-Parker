@@ -16,6 +16,16 @@ fuso: "America/Sao_Paulo"
 # a decisao vem marcada como "cara ou coroa".
 lock:
   margem_duvida: 1.5
+  # Travar no slot que menos custa ao resto da semana, movendo o jogador
+  # antes (ex.: pivo no UTIL trava no C). A CONFIRMAR na semana 1 que o
+  # Sleeper deixa mover um titular depois do jogo e travar no slot novo.
+  mover_slot: true
+  # ...mas so quando o slot novo custa pelo menos isso a menos (pontos).
+  ganho_minimo_mover: 1.0
+  # Segurar o placar (sem travar) ate perto do prazo quando ver os outros
+  # jogarem antes disso vale pelo menos isso a mais, em pontos esperados.
+  # Segurar custa o risco de esquecer de travar: abaixo disso, trava ja.
+  ganho_minimo_espera: 0.5
 
 # ESCALACAO DA NOITE: o bot so manda mensagem de troca quando ela ganha pelo
 # menos isso em valor esperado (pontos). Trocar nao custa nada, mas mensagem

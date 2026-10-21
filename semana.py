@@ -3,20 +3,17 @@
 E o que a escalacao de hora em hora e o relatorio do dia compartilham.
 
 QUEM JA TRAVOU. A API publica nao tem um campo "travado". O que ela tem e o
-placar de cada slot no confronto (`starters_points`), e a temporada 2025
-inteira da liga diz como ler: todo placar de slot diferente de zero bateu
-com UM jogo daquele jogador na semana (1559 de 1559), e 65% deles (1020)
-com um jogo que NAO era o ultimo dele — impossivel sem trava. Entao:
+placar de cada slot no confronto (`starters_points`), e ele so prova trava
+quando o jogo que bate NAO e o ultimo encerrado do jogador, ou quando o
+proximo jogo dele ja comecou (o placar velho ficou). No meio da semana o
+Sleeper mostra o placar do ultimo jogo travado ou nao (semana 1 de 2026:
+tres titulares com placar, um so travado). Entao:
 
-  * placar do slot = placar de um jogo JA ENCERRADO dele nesta semana
-    -> travado, com aquele valor;
-  * excecao: se esse jogo e o ultimo dele, o proximo ainda nao comecou e o
-    bot mandou PASSAR, o placar pode ser so o provisorio — trata como
-    aberto (a decisao ainda e sua);
+  * placar do slot = placar de um jogo encerrado, e depois dele o jogador
+    ja jogou ou esta jogando -> travado, com aquele valor;
+  * placar do ultimo jogo, com o proximo ainda por comecar -> pode ser so o
+    provisorio: vale a enquete (enquete.py). Sem voto, aberto e PENDENTE;
   * placar zero, ou batendo com jogo em andamento -> aberto.
-
-A primeira semana de 2026 confirma ou derruba essa leitura: o relatorio diz
-de onde tirou cada trava.
 """
 
 from __future__ import annotations
@@ -29,6 +26,7 @@ from clients import CACHE
 from lineup import starting_slots
 from lockin import Opcao, valor_semanal
 from contexte import ativos
+from enquete import respostas
 
 DECISOES = CACHE / "decisoes_trava.json"
 
@@ -62,6 +60,8 @@ class Estado:
     jogos: dict[str, list[Jogo]]               # jogos da semana por jogador
     placar: dict[tuple[str, str], float]       # (pid, data) -> pontos ja feitos
     origem_trava: dict[int, str] = field(default_factory=dict)
+    # slot -> (jogador, placar, data do jogo): talvez travado, sem voto ainda
+    pendentes: dict[int, tuple[str, float, str]] = field(default_factory=dict)
     roster_id: int | None = None
 
     def usados(self) -> set[str]:
@@ -110,7 +110,7 @@ def estado(ctx) -> Estado:
     except Exception as e:
         ctx.warnings.append(f"confronto indisponivel ({e}); assumindo nada travado")
 
-    dec = decisoes()
+    votos = respostas()
     for i in range(len(slots)):
         p = titulares_conf[i] or atual[i]
         pts = float(pontos_slot[i] or 0.0)
@@ -123,11 +123,17 @@ def estado(ctx) -> Estado:
         j = bate[-1]
         ultimo = j is fins[-1]
         proximo_comecou = any(x.comecou(agora) for x in jogos.get(p, []) if x.data > j.data)
-        if ultimo and not proximo_comecou and dec.get(f"{week}:{p}:{j.data}") == "passar":
-            est.origem_trava[i] = "provisorio"
-            continue
+        if ultimo and not proximo_comecou:
+            voto = votos.get(f"{week}:{p}:{j.data}")
+            if voto is None:
+                est.pendentes[i] = (p, pts, j.data)
+            if not voto:
+                est.origem_trava[i] = "provisorio"
+                continue
+            est.origem_trava[i] = "enquete"
+        else:
+            est.origem_trava[i] = j.data
         est.travados[i] = (p, pts)
-        est.origem_trava[i] = j.data
     est.abertos = [i for i in range(len(slots)) if i not in est.travados]
     return est
 

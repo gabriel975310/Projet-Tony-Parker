@@ -6,7 +6,11 @@ semana e joga a semana de novo, dia a dia, com tres politicas:
   * bot       — a escalacao do dia e a decisao de travar do `lockin.py`,
                 com as previsoes que existiam ANTES da semana (log ate a
                 vespera + projecao do Sleeper por jogo, misturados como o
-                modelo faz);
+                modelo faz); trava onde ele esta, agora ou nunca;
+  * bot+slot  — o mesmo, travando no slot que menos custa ao resto da semana;
+  * bot+segura — e ainda segura o placar (de quem passou do limiar) ate o
+                proximo jogo dele quando os jogos dos outros antes disso
+                podem mudar a decisao;
   * media     — o que um dono atento faria: escala pelo maior media, trava
                 quem passar da propria media, e trava qualquer placar no
                 ultimo jogo da semana do jogador;
@@ -34,6 +38,10 @@ from modelo import carregar_params, prever_de_log
 from names import posicoes, team_code
 from contexte import HERE, load_config
 from previsao_jogo import grupo_pos, indices, prever
+
+# bot: trava onde ele esta, agora ou nunca. bot+slot: escolhe o slot.
+# bot+segura: escolhe o slot e segura o placar ate o prazo quando compensa.
+POLITICAS = ("bot", "bot+slot", "bot+segura", "media", "primeiro")
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -142,30 +150,40 @@ def main(argv=None) -> int:
                 j = jogos_de.get(pid, {}).get(d)
                 return j.fp if j else None
 
-            for pol in ("bot", "media", "primeiro"):
+            for pol in POLITICAS:
                 travados: dict[int, float] = {}
                 usados: set[str] = set()
+                segurados: dict[int, tuple[str, float]] = {}    # slot -> (jogador, placar)
                 for k, d in enumerate(dias):
                     abertos = [i for i in range(len(slots)) if i not in travados]
                     if not abertos:
                         break
                     livres_jog = [p for p in elenco if p not in usados]
-                    hoje = {p: opc(p, d) for p in livres_jog if joga_no_dia.get((p, d))}
                     futuro = {p: [opc(p, d2) for d2 in dias[k + 1:] if joga_no_dia.get((p, d2))]
                               for p in livres_jog}
-                    if pol == "bot":
-                        esc = escalar_dia(slots, abertos, {}, hoje, futuro, pos, [None] * len(slots))
+                    # segurado: slot parado com ele, ele fora da escalacao de hoje
+                    parados = {p for p, _ in segurados.values()}
+                    ab_hoje = [i for i in abertos if i not in segurados]
+                    hoje = {p: opc(p, d) for p in livres_jog
+                            if joga_no_dia.get((p, d)) and p not in parados}
+                    if pol.startswith("bot"):
+                        esc = escalar_dia(slots, ab_hoje, {}, hoje, futuro, pos, [None] * len(slots))
                         hoje_sl = esc.hoje
                     else:
                         assign, _ = otimizar(slots, list(hoje),
-                                             lambda p, i: hoje[p].mu if i in abertos else None, pos)
-                        hoje_sl = {i: p for i, p in enumerate(assign) if p and i in abertos}
+                                             lambda p, i: hoje[p].mu if i in ab_hoje else None, pos)
+                        hoje_sl = {i: p for i, p in enumerate(assign) if p and i in ab_hoje}
                     cands = [(i, p, real(p, d)) for i, p in hoje_sl.items() if real(p, d) is not None]
+                    cands += [(i, p, x) for i, (p, x) in segurados.items()]
+                    segurados = {}
                     if not cands:
                         continue
-                    if pol == "bot":
-                        decs = decidir_travas(slots, abertos, futuro, pos, cands)
-                        trava = [(t.i, t.pid, t.pontos) for t in decs if t.travar]
+                    if pol.startswith("bot"):
+                        decs = decidir_travas(slots, abertos, futuro, pos, cands,
+                                              mover=pol != "bot", esperar=pol == "bot+segura",
+                                              n_sim=100)
+                        trava = [(t.j, t.pid, t.pontos) for t in decs if t.travar]
+                        segurados = {t.i: (t.pid, t.pontos) for t in decs if t.segurar}
                     elif pol == "media":
                         trava = [(i, p, x) for i, p, x in cands
                                  if x >= hoje[p].mu or not futuro.get(p)]

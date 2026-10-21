@@ -27,8 +27,10 @@ from clients import CACHE, esc
 from lineup import starting_slots
 from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_each_league
 from report import bloco, n, rodape, secao, titulo
+import enquete
 from run_escalacao import (em_waiver, escalacao_hoje, linhas_lineup, linhas_mudancas,
-                           linhas_pickups, pickups, prazo_mudancas, travas)
+                           linhas_pickups, linhas_travados, pickups, prazo_mudancas,
+                           travas)
 from semana import estado
 from trocas import calcular as calcular_trocas
 from trocas import linhas as linhas_trocas
@@ -45,7 +47,7 @@ def proximo_dia(ctx, est) -> str | None:
                 for j in est.restantes(p, ctx.agora)), default=None)
 
 
-def sem_jogo_hoje(ctx, dia, mud, hoje) -> list[str]:
+def sem_jogo_hoje(ctx, dia, mud, hoje, segurados=()) -> list[str]:
     """Dia sem jogo seu: so o proximo dia de jogo e se a escalacao ja serve."""
     if not dia or not hoje:
         return ["", "😴 <b>Nenhum jogo seu até o fim da semana.</b>"]
@@ -59,8 +61,9 @@ def sem_jogo_hoje(ctx, dia, mud, hoje) -> list[str]:
         return L
     prazo = prazo_mudancas(mud, hoje)
     L.append("")
-    L.append(f"🔄 Pra {quando}, mexa até {ctx.hora(prazo, '%H:%M')}:")
-    L += linhas_mudancas(ctx, mud, hoje)
+    ate = f"até {ctx.hora(prazo, '%H:%M')}" if prazo else "antes do jogo"
+    L.append(f"🔄 Pra {quando}, mexa {ate}:")
+    L += linhas_mudancas(ctx, mud, hoje, segurados)
     L.append("")
     L.append("<i>Sem pressa: no dia eu mando a escalação completa de novo.</i>")
     return L
@@ -219,6 +222,7 @@ def main_with(args, config=None) -> int:
             print(f"[{ctx.rotulo}] relatorio do dia ja saiu")
             return 0
 
+    enquete.sincronizar(ctx.cfg)
     est = estado(ctx)
     if not est.elenco:
         # Antes do draft o elenco e vazio e todo livre "melhora o time".
@@ -235,17 +239,16 @@ def main_with(args, config=None) -> int:
 
     L = [titulo("DIA", ctx.league_name, ctx.hora(ctx.agora, "%a %d/%m"))]
     jogo_hoje = dia == est.hoje and bool(hoje_op)
-    if est.travados or jogo_hoje:
+    if est.travados or est.pendentes or jogo_hoje:
         nota = f"{len(est.travados)}/{len(est.slots)} travados"
         if est.abertos and dia:
             nota += f" · os slots abertos ainda devem render ~{n(e.valor_semana)}"
         L += secao("📊", f"Semana {est.week}", nota)
-        for i, (p, pts) in sorted(est.travados.items()):
-            L.append(f"🔒 <code>{est.slots[i]}</code> {esc(ctx.name(p))} <b>{n(pts)}</b>")
+        L += linhas_travados(ctx, est)
     if jogo_hoje:
         L += linhas_lineup(ctx, alvo, e, mud, ganho, hoje_op)
     elif est.abertos:
-        L += sem_jogo_hoje(ctx, dia, mud, hoje_op)
+        L += sem_jogo_hoje(ctx, dia, mud, hoje_op, set(e.segurados.values()))
 
     picks = pickups(ctx, est, abertos, congelados, usados, fa, limite=4) if abertos else []
     if picks:

@@ -5,7 +5,9 @@ Tres decisoes, todas pelo mesmo plano da semana (lockin.py):
   1. TRAVAR OU PASSAR — pra cada titular cujo jogo acabou e ainda nao foi
      travado. Vale ate o proximo jogo dele comecar. Passar e escolher que a
      semana ainda rende mais naquele slot: com ele mesmo nos proximos jogos
-     ou com outro que entra no lugar.
+     ou com outro que entra no lugar. SEGURAR e deixar o placar travavel
+     ate perto do prazo, quando os jogos dos outros antes disso podem mudar
+     a conta. E o slot pode ser outro: o que menos custa ao resto da semana.
   2. ESCALACAO DE HOJE — quem ocupa cada slot aberto nos jogos que ainda
      nao comecaram. Slot cujo ocupante jogou cedo e PASSOU fica livre de
      novo na mesma noite: da pra por quem joga as 22h30 no lugar.
@@ -32,8 +34,9 @@ from clients import CACHE, esc
 from lineup import cabe, diff
 from lockin import chance_troca, decidir_travas, escalar_dia, valor_bilhetes
 from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_each_league
+import enquete
 from report import bloco, n, rodape, secao, titulo
-from semana import (estado, jogos_hoje, opcoes_futuras, registrar_decisao,
+from semana import (decisoes, estado, jogos_hoje, opcoes_futuras, registrar_decisao,
                     valor_temporada)
 
 AVISOS = CACHE / "escalacao_avisos.json"
@@ -82,7 +85,11 @@ def travas(ctx, est):
         return []
     # so jogo que ainda nao comecou e futuro: o que acabou de acabar sai
     futuro = opcoes_futuras(ctx, est, est.elenco)
-    return decidir_travas(est.slots, est.abertos, futuro, ctx.posicoes, cands)
+    lk = ctx.cfg.get("lock") or {}
+    return decidir_travas(est.slots, est.abertos, futuro, ctx.posicoes, cands,
+                          mover=bool(lk.get("mover_slot", True)), esperar=True,
+                          ganho_espera=float(lk.get("ganho_minimo_espera", 0.5)),
+                          ganho_mover=float(lk.get("ganho_minimo_mover", 1.0)))
 
 
 def _quem_segura(ctx, est, i: int, pid: str) -> str:
@@ -105,10 +112,28 @@ def linhas_travas(ctx, est, decs) -> list[str]:
         prox = est.restantes(t.pid, ctx.agora)
         prazo = (f"até {ctx.hora(prox[0].inicio)}" if prox
                  else "até o fim da semana")
-        duvida = abs(t.margem) < float((ctx.cfg.get("lock") or {}).get("margem_duvida", 1.5))
-        if t.travar:
-            L.append(f"✅ <b>TRAVE {nome}</b> no <code>{t.slot}</code>")
+        duvida = not t.segurar and abs(t.margem) < float((ctx.cfg.get("lock") or {}).get("margem_duvida", 1.5))
+        destino = est.slots[t.j]
+        if t.segurar:
+            esp = t.espera
+            h = t.i if t.parada is None else t.parada
+            L.append(f"⏸ <b>SEGURE {nome}</b> no <code>{est.slots[h]}</code> · não trave ainda")
+            if h != t.i:
+                L.append(f"      🧭 <i>mova do <code>{t.slot}</code> pro <code>{est.slots[h]}</code>: "
+                         f"é o slot que hoje e o resto da semana menos precisam</i>")
+            L.append(f"      🎯 {n(t.pontos)} pts · já passou do limiar (~{n(t.limiar)}), "
+                     f"mas ver os outros jogarem antes vale <b>{n(esp.ganho, 1, True)}</b>")
+            L.append(f"      🔭 <i>decido depois dos jogos de {ctx.hora(esp.ate, '%a')}: "
+                     f"{round(100 * esp.p_trava)}% de chance de travar ele</i>")
+            L.append("      ⚠️ <i>não tire ele do slot, senão o placar se perde</i>")
+        elif t.travar:
+            L.append(f"✅ <b>TRAVE {nome}</b> no <code>{destino}</code>")
             L.append(f"      🎯 <b>{n(t.pontos)}</b> pts · <i>esperar rende ~{n(t.limiar)}</i>")
+            if t.mover:
+                L.append(f"      🧭 <i>mova do <code>{t.slot}</code> pro <code>{destino}</code> antes: "
+                         f"lá o resto da semana perde ~{n(t.limiar)}, no {t.slot} ~{n(t.limiar_atual)}</i>")
+                plano_b = ("trave no " + t.slot if t.pontos >= t.limiar_atual else "passe")
+                L.append(f"      <i>(se o Sleeper não deixar mover, {plano_b})</i>")
         else:
             L.append(f"⏭ <b>PASSE {nome}</b> no <code>{t.slot}</code>")
             L.append(f"      🎯 {n(t.pontos)} pts · o slot ainda rende <b>~{n(t.limiar)}</b>")
@@ -125,23 +150,79 @@ def linhas_travas(ctx, est, decs) -> list[str]:
 # ==========================================================================
 def escalacao_hoje(ctx, est, decs):
     """(Escalacao, mudancas, ganho, valor_atual, congelados, abertos, usados)."""
-    travou = {t.i: t.pid for t in decs if t.travar}
-    abertos = [i for i in est.abertos if i not in travou]
-    usados = est.usados() | set(travou.values())
+    travou = {t.j: t.pid for t in decs if t.travar}
+    segura = [t for t in decs if t.segurar]
+    base = [i for i in est.abertos if i not in travou]
+    novos = set(travou.values()) | {t.pid for t in segura}
+    usados = est.usados() | novos
     livres = [p for p in est.elenco if p not in usados]
     # ocupante com jogo em andamento: o slot dele so mexe amanha
-    congelados = {i: est.atual[i] for i in abertos
+    congelados = {i: est.atual[i] for i in base
                   if est.atual[i] and est.em_andamento(est.atual[i], ctx.agora)}
     hoje = jogos_hoje(ctx, est, livres)
     futuro = opcoes_futuras(ctx, est, livres, so_depois_de_hoje=True)
-    e = escalar_dia(est.slots, abertos, congelados, hoje, futuro, ctx.posicoes, est.atual)
+    # quem acabou de travar ou esta segurado nao fica onde estava por inercia
+    atual = [None if p in novos else p for p in est.atual]
+
+    def escala(parados: dict[int, str]):
+        ab = [i for i in base if i not in parados]
+        return escalar_dia(est.slots, ab, congelados, hoje, futuro, ctx.posicoes, atual)
+
+    parados = estacionar(ctx, est, segura, base, congelados, escala)
+    abertos = [i for i in base if i not in parados]
+    e = escala(parados)
+    _poe_parados(ctx, est, e, parados, travou)
     atual_val = valor_bilhetes(est.slots, abertos, congelados, hoje, futuro,
                                ctx.posicoes, est.atual)
-    # so interessa trocar slot aberto em que alguem de hoje entra ou sai
+    # so interessa trocar slot aberto em que alguem de hoje entra ou sai, ou
+    # estacionar um segurado
+    seg = set(parados.values())
     mud = [(i, s, a, b) for (i, s, a, b) in diff(est.slots, est.atual, e.lineup)
-           if i in abertos and i not in congelados and (a in hoje or b in hoje)]
+           if i in base and i not in congelados
+           and (a in hoje or b in hoje or a in seg or b in seg)]
     ganho = sum(e.ganho.values()) - atual_val
     return e, mud, ganho, hoje, futuro, abertos, congelados, usados
+
+
+def estacionar(ctx, est, segura, base, congelados, escala) -> dict[int, str]:
+    """Em qual slot cada segurado fica parado: {slot: jogador}.
+
+    Segurado nao joga, mas ocupa um slot ate travar ou soltar. O melhor e o
+    que a semana menos sente fechado: os bilhetes de hoje mais o plano do
+    resto. Na hora de travar ele ainda pode ir pra outro slot. Empate fica
+    onde esta.
+    """
+    if not segura:
+        return {}
+    from itertools import product
+    opcoes = [[h for h in base if h not in congelados
+               and cabe(ctx.posicoes(t.pid), est.slots[h])] or [t.i] for t in segura]
+    melhor, chave = {}, None
+    for combo in product(*opcoes):
+        if len(set(combo)) < len(combo):
+            continue
+        parados = dict(zip(combo, (t.pid for t in segura)))
+        v = escala(parados).valor_semana
+        k = (round(v, 2), sum(h == t.i for h, t in zip(combo, segura)))
+        if chave is None or k > chave:
+            melhor, chave = parados, k
+    for t in segura:
+        t.parada = next(h for h, p in melhor.items() if p == t.pid)
+    return melhor
+
+
+def _poe_parados(ctx, est, e, parados: dict[int, str], travou: dict[int, str]) -> None:
+    """Escalacao final com quem trava e quem segura no slot certo; quem
+    estava no slot de um segurado vai pro slot que ele deixou, se couber."""
+    e.segurados = dict(parados)
+    for h, p in list(parados.items()) + list(travou.items()):
+        sai = e.lineup[h]
+        e.lineup[h] = p
+        for k, q in enumerate(e.lineup):
+            if q == p and k != h:
+                cabe_ali = (sai and sai not in e.lineup and k not in est.travados
+                            and cabe(ctx.posicoes(sai), est.slots[k]))
+                e.lineup[k] = sai if cabe_ali else None
 
 
 def prazo_mudancas(mud, hoje):
@@ -150,26 +231,42 @@ def prazo_mudancas(mud, hoje):
     return min(prazos, default=None)
 
 
-def linhas_mudancas(ctx, mud, hoje) -> list[str]:
+def linhas_mudancas(ctx, mud, hoje, segurados=()) -> list[str]:
     L = []
     for (i, slot, a, b) in mud:
         sai = esc(ctx.name(a)) if a else "vazio"
         if b:
             o = hoje.get(b)
-            hora = f" <i>{ctx.hora(o.inicio, '%H:%M')}</i>" if o else ""
+            hora = (f" <i>{ctx.hora(o.inicio, '%H:%M')}</i>" if o
+                    else " <i>⏸ segurado, não trave</i>" if b in segurados else "")
             L.append(f"🔄 <code>{slot}</code> ❌ {sai} → ✅ <b>{esc(ctx.name(b))}</b>{hora}")
         else:
             L.append(f"🔄 <code>{slot}</code> ❌ {sai} <i>(ninguém joga nesse dia nesse slot)</i>")
     return L
 
 
-def linha_troca(ctx, o, limiar: float) -> str:
-    """Quando e com que chance o slot volta a pedir troca: no fim do jogo."""
+def reserva_tarde(ctx, slot: str, o, hoje, titulares) -> str | None:
+    """Quem do banco cabe no slot e joga depois que o jogo `o` acaba.
+
+    Sem ninguem assim, nao ha troca na mesma noite: o slot so e refeito na
+    escalacao do dia seguinte.
+    """
+    fim = o.inicio + DURACAO
+    cands = [p for p, op in hoje.items() if p not in titulares and op.inicio >= fim
+             and cabe(ctx.posicoes(p), slot)]
+    return max(cands, key=lambda p: hoje[p].mu, default=None)
+
+
+def linha_troca(ctx, o, limiar: float, reserva: str | None = None, hoje=None) -> str:
+    """O que acontece se ele nao passar do limiar, e com que chance."""
     pct = round(100 * chance_troca(o, limiar))
-    if limiar < 0.5:
-        return f"      🔁 <i>trave o que vier; só troca se ele não jogar ({pct}%)</i>"
-    fim = ctx.hora(o.inicio + DURACAO, "%H:%M")
-    return f"      🔁 <i>{pct}% de chance de trocar quando o jogo acabar (~{fim})</i>"
+    if reserva and hoje:
+        r = hoje[reserva]
+        quando = (f"troque por <b>{esc(ctx.name(reserva))}</b> quando o jogo acabar "
+                  f"(~{ctx.hora(o.inicio + DURACAO, '%H:%M')}; ele joga {ctx.hora(r.inicio, '%H:%M')})")
+    else:
+        quando = "não trave: o slot volta pra escalação de amanhã"
+    return f"      🔁 <i>senão, {quando} · {pct}% de chance</i>"
 
 
 def linhas_escalacao(ctx, est, e, mud, ganho, hoje) -> list[str]:
@@ -177,7 +274,7 @@ def linhas_escalacao(ctx, est, e, mud, ganho, hoje) -> list[str]:
     prazo = prazo_mudancas(mud, hoje)
     L += secao("🏀", "Escalação de hoje",
                f"⏰ mexa até {ctx.hora(prazo, '%H:%M')}" if prazo else "")
-    L += linhas_mudancas(ctx, mud, hoje)
+    L += linhas_mudancas(ctx, mud, hoje, set(e.segurados.values()))
     L.append("")
     L.append(f"📊 <i>ganho esperado <b>{n(ganho, 1, True)}</b> na semana</i>")
     return L
@@ -207,37 +304,46 @@ def linhas_lineup(ctx, est, e, mud, ganho, hoje) -> list[str]:
     else:
         nota = "✅ o Sleeper já está com a escalação ideal"
     L = secao("🏀", "Escalação ideal de hoje", nota)
+    # Os travados ja estao no resumo da semana; aqui so os slots abertos,
+    # quem joga hoje primeiro e quem nao joga numa linha so.
+    titulares = set(e.hoje.values())
+    fora = []
     for i, slot in enumerate(est.slots):
         if i in est.travados:
-            p, pts = est.travados[i]
-            L.append(f"🔒 <code>{slot}</code> {esc(ctx.name(p))} <b>{n(pts)}</b> <i>travado</i>")
             continue
         p = e.lineup[i] if i < len(e.lineup) else None
-        if p and p in hoje:
-            o = hoje[p]
-            lim = e.limiar.get(i)
-            if lim is None:
-                quanto = ""
-            elif lim >= 0.5:
-                quanto = f" · trave se fizer <b>{n(lim)}+</b>"
-            else:
-                quanto = " · <b>trave o que vier</b>"
+        if i in e.segurados:
+            j = est.ultimo_encerrado(p, ctx.agora)
+            pts = est.placar.get((p, j.data)) if j else None
             troca = f" <i>(sai {esc(ctx.name(sai[i]))})</i>" if sai.get(i) else ""
-            marca = "🔄" if i in sai else "✅"
-            L.append(f"{marca} <code>{slot}</code> <b>{esc(ctx.name(p))}</b>{troca}")
-            L.append(f"      ⏰ <i>{ctx.hora(o.inicio, '%H:%M')}</i> · média {n(o.mu)}{quanto}")
-            if lim is not None:
-                L.append(linha_troca(ctx, o, lim))
-            jogo = next((j for j in est.jogos.get(p, []) if j.data == o.dia), None)
-            L += noticia(ctx, p, jogo)
+            L.append(f"⏸ <code>{slot}</code> <b>{esc(ctx.name(p))}</b> {n(pts)}{troca} "
+                     f"· <i>segurado, não trave ainda</i>")
+            continue
+        if not (p and p in hoje):
+            fora.append(f"<code>{slot}</code> {esc(ctx.name(p)) if p else 'vazio'}")
+            continue
+        o = hoje[p]
+        lim = e.limiar.get(i)
+        troca = f" <i>(sai {esc(ctx.name(sai[i]))})</i>" if sai.get(i) else ""
+        marca = "🔄" if i in sai else "✅"
+        L.append(f"{marca} <code>{slot}</code> <b>{esc(ctx.name(p))}</b> · "
+                 f"<i>{ctx.hora(o.inicio, '%H:%M')}</i>{troca}")
+        if lim is None:
+            L.append(f"      📊 média {n(o.mu)}")
+        elif lim < 0.5:
+            L.append(f"      🎯 <b>trave o que vier</b> <i>(média {n(o.mu)})</i>")
         else:
-            quem = esc(ctx.name(p)) if p else "vazio"
-            L.append(f"💤 <code>{slot}</code> {quem} <i>· não joga hoje</i>")
+            L.append(f"      🎯 trave se fizer <b>{n(lim)}+</b> <i>(média {n(o.mu)})</i>")
+            L.append(linha_troca(ctx, o, lim, reserva_tarde(ctx, slot, o, hoje, titulares), hoje))
+        jogo = next((j for j in est.jogos.get(p, []) if j.data == o.dia), None)
+        L += noticia(ctx, p, jogo)
+    if fora:
+        L.append("")
+        L.append("💤 <i>não jogam hoje:</i> " + " · ".join(fora))
     L.append("")
     if sai:
         L.append(f"🔄 = mexer no Sleeper · 📊 <i>ganho esperado <b>{n(ganho, 1, True)}</b> na semana</i>")
-    L.append("<i>ℹ️ ao longo do dia eu aviso se algo mudar e, quando cada jogo acabar, "
-             "se é pra travar ou trocar</i>")
+    L.append("<i>ℹ️ quando cada jogo acabar eu aviso se é pra travar</i>")
     return L
 
 
@@ -246,14 +352,79 @@ def linhas_bilhetes(ctx, est, e, hoje) -> list[str]:
     L = []
     for i, p in sorted(e.hoje.items(), key=lambda kv: hoje[kv[1]].inicio):
         o = hoje[p]
-        quanto = (f"trave se fizer <b>{n(e.limiar[i])}+</b>" if e.limiar[i] >= 0.5
-                  else "<b>trave o que vier</b> (última chance do slot)")
-        L.append(f"🏀 <b>{esc(ctx.name(p))}</b> <i>{esc(ctx.pos(p))}</i> no <code>{est.slots[i]}</code>"
+        L.append(f"🏀 <code>{est.slots[i]}</code> <b>{esc(ctx.name(p))}</b>"
                  f" · <i>{ctx.hora(o.inicio, '%H:%M')}</i>")
-        L.append(f"      🎯 {quanto} <i>(média {n(o.mu)})</i>")
-        L.append(linha_troca(ctx, o, e.limiar[i]))
+        if e.limiar[i] >= 0.5:
+            L.append(f"      🎯 trave se fizer <b>{n(e.limiar[i])}+</b> <i>(média {n(o.mu)})</i>")
+            L.append(f"      📉 <i>{round(100 * chance_troca(o, e.limiar[i]))}% de chance de não chegar</i>")
+        else:
+            L.append(f"      🎯 <b>trave o que vier</b> <i>(última chance do slot; média {n(o.mu)})</i>")
         jogo = next((j for j in est.jogos.get(p, []) if j.data == o.dia), None)
         L += noticia(ctx, p, jogo)
+        L.append("")
+    return L
+
+
+def linhas_trocas_rodada(ctx, est, e, hoje) -> list[str]:
+    """Quem do banco entra no lugar de quem, se o titular nao chegar no alvo.
+
+    Agrupa por quem entra: o mesmo reserva pode cobrir dois slots, e ai
+    entra no primeiro que ficar livre.
+    """
+    titulares = set(e.hoje.values())
+    entra: dict[str, list[int]] = {}
+    sem = []
+    for i, p in sorted(e.hoje.items(), key=lambda kv: hoje[kv[1]].inicio):
+        if e.limiar[i] < 0.5:
+            continue
+        r = reserva_tarde(ctx, est.slots[i], hoje[p], hoje, titulares)
+        if r:
+            entra.setdefault(r, []).append(i)
+        else:
+            sem.append(i)
+    if not entra and not sem:
+        return []
+    L = secao("🔁", "Trocas durante a rodada", "se o titular não chegar no alvo: não trave e troque")
+    for r, slots in sorted(entra.items(), key=lambda kv: hoje[kv[0]].inicio):
+        L.append(f"✅ <b>{esc(ctx.name(r))}</b> <i>{esc(ctx.pos(r))} · joga "
+                 f"{ctx.hora(hoje[r].inicio, '%H:%M')}</i>")
+        for k, i in enumerate(slots):
+            o = hoje[e.hoje[i]]
+            ou = "ou " if k else ""
+            L.append(f"      {ou}entra no <code>{est.slots[i]}</code> no lugar de "
+                     f"{esc(ctx.name(e.hoje[i]))} <i>(acaba ~{ctx.hora(o.inicio + DURACAO, '%H:%M')})</i>")
+        L.append("")
+    if sem:
+        quem = " · ".join(f"<code>{est.slots[i]}</code> {esc(ctx.name(e.hoje[i]))}" for i in sem)
+        L.append(f"🚫 {quem}")
+        L.append("      <i>ninguém do banco joga depois: se não chegar, não trave "
+                 "e o slot volta pra escalação de amanhã</i>")
+    return L
+
+
+def linhas_folga(ctx, est, e, hoje) -> list[str]:
+    """Quem nao joga hoje: titulares de slot aberto e banco, com o proximo jogo."""
+    def prox(p):
+        js = [j for j in est.restantes(p, ctx.agora) if j.data > est.hoje]
+        return ctx.hora(js[0].inicio, "%a") if js else "sem jogo na semana"
+
+    escalados = {p for p in e.lineup if p} | est.usados()
+    tit = [f"<code>{est.slots[i]}</code> {esc(ctx.name(e.lineup[i]))} <i>({prox(e.lineup[i])})</i>"
+           for i in est.abertos
+           if i < len(e.lineup) and e.lineup[i] and e.lineup[i] not in hoje
+           and i not in e.segurados]
+    banco = [f"{esc(ctx.name(p))} <i>({prox(p)})</i>" for p in est.elenco
+             if p not in escalados and p not in hoje]
+    if not tit and not banco:
+        return []
+    L = secao("💤", "Não jogam hoje")
+    if tit:
+        L.append("<b>Titulares</b>")
+        L += [f"      {x}" for x in tit]
+        L.append("")
+    if banco:
+        L.append("<b>Banco</b>")
+        L += [f"      {x}" for x in banco]
     return L
 
 
@@ -364,12 +535,60 @@ def linhas_pickups(ctx, picks, titulo_txt="Pegar agora", icone="➕",
 
 
 # ==========================================================================
-def painel(ctx, est) -> list[str]:
-    travados = len(est.travados)
-    L = ["", f"📊 <b>Semana {est.week}</b> · {travados}/{len(est.slots)} slots travados"]
-    for i, (p, pts) in sorted(est.travados.items()):
-        L.append(f"🔒 <code>{est.slots[i]}</code> {esc(ctx.name(p))} <b>{n(pts)}</b>")
+def linhas_travados(ctx, est) -> list[str]:
+    """Travados (os provados e os que voce confirmou) e os talvez-travados."""
+    L = [f"🔒 <code>{est.slots[i]}</code> {esc(ctx.name(p))} <b>{n(pts)}</b>"
+         for i, (p, pts) in sorted(est.travados.items())]
+    for i, (p, pts, _) in sorted(est.pendentes.items()):
+        L.append(f"❓ <code>{est.slots[i]}</code> {esc(ctx.name(p))} {n(pts)} "
+                 f"<i>· travou? marque na enquete</i>")
+    if est.pendentes:
+        L.append("")
+        L.append("<i>ℹ️ sem voto, conto o ❓ como aberto</i>")
     return L
+
+
+def painel(ctx, est) -> list[str]:
+    L = secao("📊", f"Semana {est.week}",
+              f"{len(est.travados)}/{len(est.slots)} slots travados")
+    return L + linhas_travados(ctx, est)
+
+
+def mandar_enquete(ctx, est, decs) -> None:
+    """Pergunta quem dos talvez-travados voce travou: so depois da rodada
+    daquele jogo (a decisao ja foi tomada) e uma vez por jogo."""
+    ja = enquete.perguntadas()
+    dec = decisoes()
+    agora = {t.pid: ("SEGURAR" if t.segurar else "TRAVAR" if t.travar else "PASSAR")
+             for t in decs}
+    ordem = {"travar": 3, "segurar": 2, None: 1, "passar": 0}
+    itens = []
+    for i, (p, pts, data) in est.pendentes.items():
+        chave = f"{est.week}:{p}:{data}"
+        if data >= est.hoje or chave in ja:
+            continue
+        antes = dec.get(chave)
+        if antes:
+            rec = f"recomendei {antes.upper()}"
+        elif p in agora:
+            rec = f"agora eu diria {agora[p]}"
+        else:
+            rec = "sem recomendação"
+        chance = ordem.get(antes or (agora.get(p) or "").lower() or None, 1)
+        itens.append((chance, pts, chave,
+                      f"{ctx.name(p)} · {est.slots[i]} · {n(pts)} pts · {rec}"))
+    if not itens:
+        return
+    itens.sort(key=lambda x: (-x[0], -x[1]))
+    pergunta = (f"Semana {est.week}: quem destes você TRAVOU? O Sleeper não me mostra "
+                f"até o próximo jogo deles. Marque todos (ou '{enquete.NENHUM}').")
+    if ctx.args.dry_run:
+        print("\n(enquete, dry-run: nao enviada)\n" + pergunta)
+        for *_, t in itens:
+            print(f"  [ ] {t}")
+        return
+    if enquete.enviar(ctx.cfg, pergunta, [(c, t) for *_, c, t in itens]):
+        print(f"[{ctx.rotulo}] enquete de trava: {len(itens)} jogador(es)")
 
 
 STATUS_LOG = CACHE / "status_log.json"
@@ -414,12 +633,14 @@ def main_with(args, config=None) -> int:
     if not ctx.sl.lock_in():
         ctx.warnings.append("esta liga NAO esta no modo Lock-In; a logica de trava nao se aplica")
     registrar_status(ctx)
+    enquete.sincronizar(ctx.cfg)
     est = estado(ctx)
     if not est.elenco:
         # Antes do draft o elenco e vazio e todo livre "melhora o time".
         print(f"[{ctx.rotulo}] elenco vazio (o draft ainda nao aconteceu)")
         return 0
     decs = travas(ctx, est)
+    mandar_enquete(ctx, est, decs)
     e, mud, ganho, hoje, futuro, abertos, congelados, usados = escalacao_hoje(ctx, est, decs)
 
     minimo = float((ctx.cfg.get("escalacao") or {}).get("ganho_minimo", 0.5))
@@ -434,7 +655,8 @@ def main_with(args, config=None) -> int:
     novos_trava = []
     for t in decs:
         j = est.ultimo_encerrado(t.pid, ctx.agora)
-        chave = f"trava:{est.week}:{t.pid}:{j.data if j else '?'}"
+        acao = "segurar" if t.segurar else f"travar{t.j}" if t.travar else "passar"
+        chave = f"trava:{est.week}:{t.pid}:{j.data if j else '?'}:{acao}"
         if not gate or not ja_avisado(AVISOS, chave):
             novos_trava.append((t, chave, j))
 
@@ -442,7 +664,8 @@ def main_with(args, config=None) -> int:
     perto = proximo_tip is not None and proximo_tip - ctx.agora <= timedelta(hours=JANELA_ESCALACAO_H)
     assinatura = hashlib.sha1(repr(sorted((i, b) for i, _, _, b in mud)).encode()).hexdigest()[:10]
     chave_esc = f"escala:{est.hoje}:{assinatura}"
-    manda_esc = bool(mud) and ganho >= minimo and (
+    estaciona = any(b in e.segurados.values() for _, _, _, b in mud)
+    manda_esc = bool(mud) and (ganho >= minimo or estaciona) and (
         not gate or (perto and not ja_avisado(AVISOS, chave_esc)))
     chaves_pick = [f"add:{est.hoje}:{r['add']}:{r['drop']}" for r in picks]
     picks_novos = [r for r, k in zip(picks, chaves_pick)
@@ -462,8 +685,11 @@ def main_with(args, config=None) -> int:
     if manda_esc:
         L += linhas_escalacao(ctx, est, e, mud, ganho, hoje)
     if e.hoje and (manda_esc or not gate):
-        L += secao("🎯", "Hoje: trave a partir de")
+        L += secao("🎯", "Jogam hoje", "a partir de quanto travar")
         L += linhas_bilhetes(ctx, est, e, hoje)
+        L += linhas_trocas_rodada(ctx, est, e, hoje)
+    if hoje and (manda_esc or not gate):
+        L += linhas_folga(ctx, est, e, hoje)
     if picks_novos:
         L += linhas_pickups(ctx, picks_novos)
     msg = bloco(L) + rodape(ctx.warnings)
@@ -473,7 +699,8 @@ def main_with(args, config=None) -> int:
         for t, chave, j in novos_trava:
             marcar_avisado(AVISOS, chave)
             if j:
-                registrar_decisao(est.week, t.pid, j.data, "travar" if t.travar else "passar")
+                registrar_decisao(est.week, t.pid, j.data, "segurar" if t.segurar
+                                  else "travar" if t.travar else "passar")
         if manda_esc:
             marcar_avisado(AVISOS, chave_esc)
         for r in picks_novos:

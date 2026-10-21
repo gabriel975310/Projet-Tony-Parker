@@ -131,6 +131,89 @@ def test_util_custa_mais_que_c():
     assert pl.limiar([0, 1], 1, "c1") >= pl.limiar([0, 1], 0, "c1") - 1e-9
 
 
+def test_trava_no_slot_que_menos_custa():
+    """Pivo no UTIL trava no C: o UTIL ainda serve pro armador de quinta."""
+    pos = {"c": ["C"], "g": ["PG"]}
+    fut = {"c": [_o("c", 5, 20)], "g": [_o("g", 3, 25)]}
+    t = decidir_travas(["C", "UTIL"], [0, 1], fut, lambda p: pos[p], [(1, "c", 30.0)])[0]
+    assert t.travar and t.j == 0 and t.mover
+    assert t.limiar < t.limiar_atual
+    fixo = decidir_travas(["C", "UTIL"], [0, 1], fut, lambda p: pos[p], [(1, "c", 30.0)],
+                          mover=False)[0]
+    assert fixo.j == 1 and not fixo.mover
+
+
+def _cenario_espera():
+    """A fez o placar no G e so joga de novo sabado. B (variancia alta) joga
+    amanha no UTIL; C joga qua e qui. Se B explodir e fechar o UTIL, o G
+    vira o unico slot pro C: ai vale mais soltar o A."""
+    pos = {"a": ["PG"], "b": ["PG"], "c": ["PG"]}
+    fut = {"a": [_o("a", 5, 20)], "b": [_o("b", 1, 25, sd=12)],
+           "c": [_o("c", 3, 30, sd=8), _o("c", 4, 30, sd=8)]}
+    return pos, fut
+
+
+def test_segura_quando_os_outros_podem_mudar_a_conta():
+    pos, fut = _cenario_espera()
+    t = decidir_travas(["G", "UTIL"], [0, 1], fut, lambda p: pos[p], [(0, "a", 28.0)],
+                       esperar=True)[0]
+    assert t.pontos > t.limiar                # pela conta de agora, travaria
+    assert t.segurar and not t.travar
+    assert 0.5 < t.espera.p_trava < 0.95      # as vezes solta o slot depois
+
+
+def test_placar_muito_alto_trava_mesmo_podendo_esperar():
+    pos, fut = _cenario_espera()
+    t = decidir_travas(["G", "UTIL"], [0, 1], fut, lambda p: pos[p], [(0, "a", 40.0)],
+                       esperar=True)[0]
+    assert t.travar and not t.segurar
+
+
+def test_segura_pra_escolher_o_slot_depois():
+    """A (SF/PF) foi bem no UTIL, mas ainda nao se sabe quem mais vai bem.
+    Amanha B (SF) e C (PF) jogam; depois D (SF) e E (PF). Se B explodir e
+    fechar o SF, o A trava no PF e o UTIL fica pro D e o E. So existe essa
+    escolha se der pra mover o A de slot antes de travar."""
+    pos = {"a": ["SF", "PF"], "b": ["SF"], "c": ["PF"], "d": ["SF"], "e": ["PF"]}
+    fut = {"a": [_o("a", 6, 22)], "b": [_o("b", 1, 24, sd=12)], "c": [_o("c", 1, 24, sd=12)],
+           "d": [_o("d", 4, 27)], "e": [_o("e", 5, 27)]}
+    S = ["SF", "PF", "UTIL"]
+
+    def dec(mover):
+        return decidir_travas(S, [0, 1, 2], fut, lambda p: pos[p], [(2, "a", 34.0)],
+                              esperar=True, mover=mover)[0]
+    assert dec(True).segurar
+    fixo = dec(False)
+    assert fixo.travar and fixo.espera.ganho < 0.1
+
+
+def test_sem_jogo_dos_outros_antes_do_prazo_nao_segura():
+    pos, fut = _cenario_espera()
+    fut["a"] = [_o("a", 1, 20)]               # A joga amanha: nada informa antes
+    t = decidir_travas(["G", "UTIL"], [0, 1], fut, lambda p: pos[p], [(0, "a", 28.0)],
+                       esperar=True)[0]
+    assert not t.segurar and t.espera.ate is None
+
+
+def test_segurado_estaciona_no_slot_que_ninguem_usa():
+    """Pivo segurado no UTIL vai pro C: o armador de hoje precisa do UTIL."""
+    from run_escalacao import estacionar
+    from lockin import Trava
+    slots = ["C", "UTIL"]
+    pos = {"c": ["C"], "g": ["PG"]}
+    hoje = {"g": _o("g", 0, 25)}
+    fut = {"g": [], "c": []}
+    ctx = SimpleNamespace(posicoes=lambda p: pos[p])
+    est = SimpleNamespace(slots=slots)
+    t = Trava(1, "UTIL", "c", 30.0, 20.0, False, segurar=True)
+
+    def escala(parados):
+        ab = [i for i in [0, 1] if i not in parados]
+        return escalar_dia(slots, ab, {}, hoje, fut, lambda p: pos[p], [None, None])
+    assert estacionar(ctx, est, [t], [0, 1], {}, escala) == {0: "c"}
+    assert t.parada == 0
+
+
 def test_escalacao_poe_quem_joga_hoje_nos_slots_abertos():
     pos = {"a": ["PG"], "b": ["PG", "SG"], "c": ["C"]}
     hoje = {"a": _o("a", 0, 20), "c": _o("c", 0, 25)}
@@ -240,24 +323,53 @@ def _ctx_falso(starters_points, agora):
     return semana, ctx
 
 
-def test_placar_de_jogo_encerrado_e_trava(monkeypatch):
+def test_placar_do_ultimo_jogo_sem_voto_e_pendente(monkeypatch):
+    # semana 1 de 2026: o Sleeper mostra o placar do ultimo jogo travado ou nao
     semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(hours=4))
-    monkeypatch.setattr(semana, "decisoes", lambda: {})
+    monkeypatch.setattr(semana, "respostas", lambda: {})
+    est = semana.estado(ctx)
+    assert est.travados == {} and est.abertos == [0, 1]
+    assert est.pendentes == {0: ("a", 30.0, "2026-10-26")}
+
+
+def test_enquete_confirma_ou_derruba_a_trava(monkeypatch):
+    semana, ctx = _ctx_falso([30.0, 12.0], T0 + timedelta(hours=4))
+    monkeypatch.setattr(semana, "respostas",
+                        lambda: {"2:a:2026-10-26": True, "2:b:2026-10-26": False})
     est = semana.estado(ctx)
     assert est.travados == {0: ("a", 30.0)} and est.abertos == [1]
+    assert est.pendentes == {}
 
 
-def test_provisorio_depois_de_passe_fica_aberto(monkeypatch):
-    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(hours=4))
-    monkeypatch.setattr(semana, "decisoes", lambda: {"2:a:2026-10-26": "passar"})
-    assert semana.estado(ctx).abertos == [0, 1]
+def test_placar_velho_depois_do_proximo_jogo_prova_a_trava(monkeypatch):
+    # o jogo de 28/10 do "a" ja comecou e o slot segue com o placar de 26/10
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=1))
+    monkeypatch.setattr(semana, "respostas", lambda: {})
+    est = semana.estado(ctx)
+    assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
 
 
 def test_placar_ao_vivo_nao_e_trava(monkeypatch):
     # jogo em andamento: o placar nao bate com jogo ENCERRADO
     semana, ctx = _ctx_falso([0.0, 7.5], T0 + timedelta(hours=1))
-    monkeypatch.setattr(semana, "decisoes", lambda: {})
+    monkeypatch.setattr(semana, "respostas", lambda: {})
     assert semana.estado(ctx).abertos == [0, 1]
+
+
+def test_voto_da_enquete_vira_resposta(monkeypatch, tmp_path):
+    import enquete
+    monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
+    enquete._gravar({"enquetes": {"P1": {"chaves": ["1:a:d", "1:b:d"], "votos": None}},
+                     "respostas": {}})
+    ups = {"ok": True, "result": [{"update_id": 1, "poll_answer": {"poll_id": "P1", "option_ids": [1]}}]}
+    monkeypatch.setattr(enquete.requests, "get",
+                        lambda *a, **k: SimpleNamespace(ok=True, json=lambda: ups))
+    enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
+    assert enquete.respostas() == {"1:a:d": False, "1:b:d": True}
+    # "nenhum desses" (a ultima opcao): todos abertos
+    ups["result"][0]["poll_answer"]["option_ids"] = [2]
+    enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
+    assert enquete.respostas() == {"1:a:d": False, "1:b:d": False}
 
 
 # -- draft -------------------------------------------------------------------
