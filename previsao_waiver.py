@@ -49,6 +49,12 @@ COEF = {
 }
 MIN_JOGOS = 5
 TETO = 20.0             # media x presenca acima disso: fora da faixa medida
+# O livre que o bot escolhe (o melhor de muitos) rende menos que o previsto:
+# na liga em 2024-2025 (15 mil pares livre x um dos 3 piores do elenco, 20
+# jogos do time seguintes, backtest_seuil.py) o livre fez 1,24 pt/semana a
+# menos que o previsto e quem sai, 0,36; no par, realizado ~ -1,1 + 1,07 x
+# previsto. O ganho de add e de claim desconta isto por semana.
+VIES_LIVRE = 1.0
 
 
 def prever(S: float, R5: float, R10: float, mu: float, pres10: float, pres: float,

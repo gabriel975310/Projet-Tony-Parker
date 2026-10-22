@@ -46,15 +46,19 @@ waivers:
   # Ganho minimo pra sugerir um add, em pontos esperados NA SEMANA (o que o
   # livre rende no slot menos o que voce perde com quem sai). Add na NBA nao
   # queima prioridade (os livres sao instantaneos), so o jogador dispensado.
+  # Medido (backtest_seuil.py, 2024-2025): previsto 1-2 realiza ~0, previsto
+  # 2-3 realiza +0,8 a +1,5. A temporada ja desconta o vies do livre.
   ganho_minimo: 2.0
   # Quanto pesa o resto da temporada de quem voce dispensa. 1.0 = o bot
   # cobra o valor inteiro de temporada do dispensado; 0 = so olha a semana.
   peso_temporada: 1.0
   never_drop: []                 # nomes exatos, ex: "Nikola Jokić"
   # Claim de waiver (dispensado pela liga, ainda em waiver): ganho minimo no
-  # titular, em pontos por semana nas proximas `horizonte_semanas`. Mais alto
-  # que o do add porque o claim gasta a sua prioridade.
-  ganho_minimo_claim: 3.0
+  # titular, em pontos por semana nas proximas `horizonte_semanas`, ja
+  # descontado o vies do livre (o previsto rende ~1 pt/semana a menos). Mais
+  # alto que o do add porque o claim gasta a sua prioridade: 2 descontado =
+  # 3 previsto, que realiza ~+3 pts/semana e da certo 65% das vezes.
+  ganho_minimo_claim: 2.0
   horizonte_semanas: 6
 
 trocas:

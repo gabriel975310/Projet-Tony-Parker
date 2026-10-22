@@ -233,6 +233,85 @@ def test_chance_troca():
     assert chance_troca(o, 30) > chance_troca(o, 20)
 
 
+def test_chance_de_passar_o_placar():
+    from lockin import chance_superar
+    # um jogo so: e a chance de ele fazer mais que o placar (um pouco abaixo
+    # de 50% na media: a mediana do jogo fica abaixo da media)
+    assert chance_superar([_o("a", 1, 20, 6)], 20) == pytest.approx(0.46, abs=0.01)
+    # mais jogos, mais chances; placar maior, menos
+    dois = [_o("a", 1, 20, 6), _o("b", 2, 20, 6)]
+    assert chance_superar(dois, 20) > chance_superar([_o("a", 1, 20, 6)], 20)
+    assert chance_superar(dois, 30) < chance_superar(dois, 20)
+    assert chance_superar([], 10) == 0.0
+
+
+TABELA_ECART = {
+    "tiers": {"estrela 32+": 32, "titular 26-32": 26, "banco 10-18": 10, "terrão <10": 0},
+    "faixas": ["0-5", "6-19", "20+"],
+    "parte": {t: {"48": 1.0, "24": 0.5, "12": 0.22, "0": 0.0} for t in
+              ("estrela 32+", "titular 26-32", "banco 10-18", "terrão <10")},
+    "fator": {t: {"12": {"0-5": 1.2, "6-19": 1.0, "20+": 0.4 if t != "banco 10-18" else 2.0}}
+              for t in ("estrela 32+", "titular 26-32", "banco 10-18", "terrão <10")},
+    "relogio": {"0-5": {"12": [37, 45], "24": [80, 89]}, "6-14": {"12": [35, 43], "24": [78, 88]},
+                "15+": {"12": [31, 38], "24": [75, 85]}},
+    "intervalo": 14.5}
+
+
+def test_projecao_ao_vivo(monkeypatch):
+    import ecart
+    from lockin import projecao_ao_vivo
+    # sem tabela: a fracao do relogio
+    monkeypatch.setattr(ecart, "tabelas", lambda: None)
+    assert projecao_ao_vivo(10, 20, 6, 24) == pytest.approx((20.0, 6 * 0.5 ** 0.5))
+    assert projecao_ao_vivo(31, 20, 6, 0) == (31.0, 0.0)     # acabou: o que fez
+    # com a tabela: a parte medida do jogo, e o placar no 4o quarto
+    monkeypatch.setattr(ecart, "tabelas", lambda: TABELA_ECART)
+    assert projecao_ao_vivo(0, 20, 6, 12, 34)[0] == pytest.approx(20 * 0.22)
+    assert projecao_ao_vivo(0, 20, 6, 12, 34, 25)[0] == pytest.approx(20 * 0.22 * 0.4)
+    assert projecao_ao_vivo(0, 20, 6, 12, 34, 2)[0] == pytest.approx(20 * 0.22 * 1.2)
+    assert projecao_ao_vivo(0, 20, 6, 12, 12, 25)[0] == pytest.approx(20 * 0.22 * 2.0)  # banco
+
+
+def test_relogio_do_jogo_diz_quanto_falta_e_quando_acaba():
+    j = Jogo("1", "2026-10-26", 2, "DEN", "LAL", tip=T0, estado="in", periodo=4, relogio=300)
+    agora = T0 + timedelta(hours=1, minutes=50)
+    assert j.restante_min(agora) == pytest.approx(5.0)
+    import ecart
+    ecart.tabelas.cache_clear()
+    orig = ecart.tabelas
+    try:
+        ecart.tabelas = lambda: TABELA_ECART
+        # 5 min de jogo, sem placar: entre 0 e 12 min na tabela de 0-5 pts
+        assert j.fim_previsto(agora) == agora + timedelta(minutes=37 * 5 / 12)
+        j.pontos_casa, j.pontos_fora = 100, 80          # blowout anda mais rapido
+        assert j.fim_previsto(agora) < agora + timedelta(minutes=37 * 5 / 12)
+        assert j.fim_previsto(agora, p90=True) > j.fim_previsto(agora)
+    finally:
+        ecart.tabelas = orig
+    # sem relogio da ESPN: pelo tempo desde o tip-off
+    j2 = Jogo("2", "2026-10-26", 2, "DEN", "LAL", tip=T0)
+    assert j2.restante_min(T0 + timedelta(minutes=67, seconds=30)) == pytest.approx(24.0)
+
+
+def test_situacao_do_jogo():
+    j = Jogo("1", "2026-10-26", 2, "DEN", "LAL", tip=T0, estado="in", periodo=4, relogio=300,
+             pontos_casa=101, pontos_fora=98)
+    agora = T0 + timedelta(hours=2)
+    assert j.situacao("LAL", agora) == "🔥 pau a pau · LAL perde por 3 (98-101)"
+    j.pontos_fora = 84
+    assert j.situacao("DEN", agora).startswith("💤 blowout · DEN vence por 17")
+    j.periodo, j.pontos_fora = 2, 92          # 9 no 2º quarto
+    assert j.situacao("DEN", agora).startswith("normal")
+    assert Jogo("2", "2026-10-26", 2, "DEN", "LAL", tip=T0).situacao("DEN", agora) is None
+
+
+def test_sobrenome_pula_sufixo():
+    from run_escalacao import sobrenome
+    assert sobrenome("Darius Acuff Jr.") == "Acuff"
+    assert sobrenome("Gary Trent Jr. II") == "Trent"
+    assert sobrenome("Derik Queen") == "Queen"
+
+
 # -- modelo ------------------------------------------------------------------
 def _jogos(mins, fp_por_min=1.0):
     return [SimpleNamespace(min=m, fp=m * fp_por_min, data=f"2025-11-{k + 1:02d}", team="X")
@@ -384,6 +463,24 @@ def test_voto_da_enquete_vira_resposta(monkeypatch, tmp_path):
     ups["result"][0]["poll_answer"]["option_ids"] = [2]
     enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
     assert enquete.respostas() == {"1:a:d": False, "1:b:d": False}
+
+
+def test_mensagem_corrige_a_enquete(monkeypatch, tmp_path):
+    import enquete
+    monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
+    enquete._gravar({"enquetes": {"P1": {
+        "chaves": ["1:a:d", "1:b:d"], "votos": [0],
+        "textos": ["Derik Queen · PF · 20,0 pts", "Caleb Wilson · F · 11,5 pts"]}},
+        "respostas": {"1:a:d": True, "1:b:d": False}})
+    msg = lambda uid, txt: {"update_id": uid, "message": {"chat": {"id": 42}, "text": txt}}
+    ups = {"ok": True, "result": [msg(5, "não travei Queen"), msg(6, "Travei wilson")]}
+    monkeypatch.setattr(enquete.requests, "get",
+                        lambda *a, **k: SimpleNamespace(ok=True, json=lambda: ups))
+    cfg = {"telegram": {"bot_token": "t", "chat_id": "42"}}
+    assert enquete.sincronizar(cfg) == [("Derik Queen", False), ("Caleb Wilson", True)]
+    assert enquete.respostas() == {"1:a:d": False, "1:b:d": True}
+    # mensagem ja lida nao volta a valer
+    assert enquete.sincronizar(cfg) == []
 
 
 # -- draft -------------------------------------------------------------------
@@ -552,6 +649,17 @@ def test_status_fora_em_qualquer_fonte_e_fora():
     assert m.status("1") == "Out"           # a ESPN, mais fresca, ja diz Out
     assert m.status("2") == "Out"           # o Sleeper diz Out: vale
     assert m.status("3") == "DTD"
+
+
+def test_chance_por_status_depende_da_minutagem():
+    from modelo import Modelo
+    J = SimpleNamespace
+    logs = {"1": [J(min=35.0)] * 15, "2": [J(min=12.0)] * 15, "3": []}
+    pool = {p: {"injury_status": "Questionable"} for p in logs}
+    m = Modelo(logs, {}, {}, {}, pool, P={"p_falta": {}}, lesoes={})
+    assert m.p_jogar("1") == 0.85           # estrela Questionable joga quase sempre
+    assert m.p_jogar("2") == 0.57           # o do banco, nem tanto
+    assert m.p_jogar("3") == 0.73           # sem minutagem: a media do status
 
 
 def test_noticia_le_o_jogo_certo():

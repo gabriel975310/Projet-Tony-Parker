@@ -109,6 +109,50 @@ def valor_sequencia(opcoes, piso: float = 0.0) -> float:
     return V
 
 
+def chance_superar(opcoes, s: float) -> float:
+    """Chance de o slot, seguindo a parada otima sobre `opcoes`, travar um
+    placar ACIMA de `s`. E o "passar compensa?" em porcentagem: o limiar diz
+    quanto se espera, isto diz quantas vezes se ganha."""
+    por_dia: dict[str, list[Opcao]] = {}
+    for o in opcoes:
+        por_dia.setdefault(o.dia, []).append(o)
+    dias = sorted(por_dia)
+    # de tras pra frente: quem joga em cada dia e o valor de esperar depois dele
+    V, plano = 0.0, []
+    for dia in reversed(dias):
+        o = max(por_dia[dia], key=lambda x: x.p * e_max(x.mu, x.sd, V) + (1 - x.p) * V)
+        plano.append((o, V))
+        V = max(V, o.p * e_max(o.mu, o.sd, V) + (1 - o.p) * V)
+    chega, ganha = 1.0, 0.0
+    for o, depois in reversed(plano):
+        m = o.mu - MEDIANA * o.sd
+        ganha += chega * o.p * p_acima(m, o.sd, max(depois, s))
+        chega *= 1 - o.p * p_acima(m, o.sd, depois)
+    return ganha
+
+
+# A chance de passar de um placar sai do Normal 4-5 pontos alta: a mediana
+# do jogo fica um pouco abaixo da media (cauda longa pra cima) e os jogos da
+# mesma semana andam juntos (correlacao 0,055). Medido em 2024-2025 da liga,
+# fora da amostra: 1o jogo da semana entre -1 e 0 desvio, o Normal dava 84%
+# de algum jogo seguinte passar dele, foram 79%; com a media 0,10 desvio
+# abaixo, 81%. So no numero que vai na mensagem: no replay da trava, mexer
+# no desvio de 0,9x a 1,25x muda menos de 1 pt por semana.
+MEDIANA = 0.10
+
+
+def projecao_ao_vivo(feito: float, mu: float, sd: float, falta_min: float,
+                     minutos: float | None = None, margem: int | None = None,
+                     anos: int | None = None) -> tuple[float, float]:
+    """(media, desvio) do placar final de quem esta em quadra: o que ele ja
+    fez mais o que ainda deve fazer, medido (ecart.py) pela faixa de minutos
+    dele e pelo placar do momento. O desvio encolhe com a raiz do tempo que
+    falta (medido: bate com o real, 0,95-1,10x)."""
+    from ecart import resto
+    falta = min(max(falta_min, 0.0), 48.0)
+    return feito + mu * resto(falta, minutos, margem, anos), sd * sqrt(falta / 48.0)
+
+
 def valor_semanal(mu: float, sd: float, p: float, n_jogos: float) -> float:
     """Quanto um jogador SOZINHO num slot rende por semana no Lock-In.
 

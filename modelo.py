@@ -58,13 +58,25 @@ JANELA = 5
 ROTACAO = 20.0
 LIMIAR_VAGO = 8.0
 
-# Status do Sleeper na NBA -> chance de jogar. NAO e medido: o Sleeper nao
-# guarda historico de status, entao nao ha com o que calibrar. Sao pontos de
-# partida conservadores; o que importa e Out = 0 e GTD bem abaixo de 1.
+# Status -> chance de jogar, medida nos relatorios oficiais de lesao da NBA
+# (backtest_statut.py: 2023-24 a 2025-26, ~9,8 mil jogador-jogo com status).
+# Questionable joga 73% (o bot usava 55%), Probable 93%, Doubtful 4-10%; o
+# horario do relatorio quase nao muda isso (13h, 17h ou o ultimo). GTD e o
+# Questionable com outro nome. DTD (so a ESPN usa) fica entre Q e P: nao ha
+# relatorio pra medir.
 P_STATUS = {
     "Out": 0.0, "IR": 0.0, "Sus": 0.0, "NA": 0.0, "DNR": 0.0, "COV": 0.0,
-    "Doubtful": 0.2, "GTD": 0.5, "Questionable": 0.55, "DTD": 0.7,
-    "Probable": 0.9,
+    "Doubtful": 0.08, "GTD": 0.73, "Questionable": 0.73, "DTD": 0.8,
+    "Probable": 0.93,
+}
+# Pela minutagem dele (media dos ultimos 15 jogos): o titular Questionable
+# joga quase sempre, o do banco nem sempre (lesao ou tecnico). Fora da
+# amostra melhora o Brier 23% sobre os chutes antigos, contra 20% so com o
+# status; motivo, experiencia, fase, campanha e b2b nao acrescentam.
+P_STATUS_MIN = {
+    "Questionable": ((32, 0.85), (26, 0.79), (18, 0.67), (0, 0.57)),
+    "GTD": ((32, 0.85), (26, 0.79), (18, 0.67), (0, 0.57)),
+    "Probable": ((32, 0.99), (26, 0.97), (18, 0.96), (0, 0.88)),
 }
 FORA = {k for k, v in P_STATUS.items() if v == 0.0}
 # Status da ESPN -> o do Sleeper.
@@ -337,15 +349,23 @@ class Modelo:
             # Prazo que ja passou com ele ainda fora nao diz nada: vale o status.
             if jogo.data >= ret[:10] and (self.hoje is None or ret[:10] > self.hoje):
                 return P_VOLTA * self.carga(pid, jogo)
-            return P_STATUS[st]
+            return self.p_status(pid, st)
         if st in P_STATUS:
-            return P_STATUS[st]
+            return self.p_status(pid, st)
         js = self.logs.get(pid) or []
         pf = self.P.get("p_falta") or {}
         # faltou o ultimo jogo do time? lesao costuma durar mais de um dia
         if js and jogo is not None and self._faltou_ultimo(pid, js[-1].data, jogo.data):
             return 1.0 - pf.get("faltou_ultimo", 0.6)
         return self.carga(pid, jogo)
+
+    def p_status(self, pid: str, st: str) -> float:
+        faixas = P_STATUS_MIN.get(st)
+        js = (self.logs.get(pid) or [])[-15:]
+        mins = sum(j.min for j in js) / len(js) if js else self._priors(pid)[0]
+        if not faixas or mins is None:
+            return P_STATUS[st]
+        return next(p for lo, p in faixas if mins >= lo)
 
     def _faltou_ultimo(self, pid, ultima_data, data_jogo) -> bool:
         time = (self.pool.get(pid) or {}).get("team")

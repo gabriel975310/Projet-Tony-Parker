@@ -12,6 +12,8 @@ cuida do que trava hoje a noite; aqui e o que pede calma:
   * seu elenco: quem esta subindo ou caindo de papel;
   * CLAIMS: dispensados pela liga nos ultimos dias (ficam em waiver) que
     melhoram o seu titular de temporada, com quem sai no lugar;
+    ADDS e CLAIMS saem no FIM DA NOITE (run_escalacao, depois do ultimo
+    jogo); aqui so se a mensagem da noite nao saiu;
   * TROCAS, ate o prazo da liga: a lista inteira na segunda e, nos outros
     dias, so a proposta que ainda nao foi sugerida.
 
@@ -23,12 +25,15 @@ from __future__ import annotations
 import sys
 from dataclasses import replace
 
+from datetime import date, timedelta
+
 from agenda import hoje_et
 from clients import CACHE, esc
 from lineup import starting_slots
 from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_each_league
 from report import bloco, n, rodape, secao, titulo
 import enquete
+from run_escalacao import AVISOS as AVISOS_NOITE
 from run_escalacao import (em_waiver, escalacao_hoje, linhas_lineup, linhas_mudancas,
                            linhas_pickups, linhas_travados, pickups, prazo_mudancas,
                            travas)
@@ -38,6 +43,7 @@ from trocas import calcular as calcular_trocas
 from trocas import chave_proposta
 from trocas import linhas as linhas_trocas
 from trocas import Plano
+from previsao_waiver import VIES_LIVRE
 
 AVISOS = CACHE / "dia_avisos.json"
 
@@ -136,10 +142,12 @@ def claims(ctx, est, ids: set[str], limite: int = 3) -> list[dict]:
     media do horizonte. Quem sai e o que menos custa; com vaga no elenco,
     ninguem sai.
     Claim nao e livre: na prioridade rolante ele te manda pro fim da fila,
-    entao o corte (`ganho_minimo_claim`) e mais alto que o do add.
+    entao o corte (`ganho_minimo_claim`) e mais alto que o do add. O ganho
+    ja desconta o que o livre escolhido costuma render abaixo do previsto
+    (VIES_LIVRE).
     """
     cfg = ctx.cfg.get("waivers") or {}
-    minimo = float(cfg.get("ganho_minimo_claim", 3.0))
+    minimo = float(cfg.get("ganho_minimo_claim", 2.0))
     semanas = int(cfg.get("horizonte_semanas") or 6)
     nunca = set(cfg.get("never_drop") or [])
     slots = starting_slots(ctx.sl.roster_positions())
@@ -165,7 +173,7 @@ def claims(ctx, est, ids: set[str], limite: int = 3) -> list[dict]:
         melhor = None
         for d in saem:
             novo = [p for p in est.elenco if p != d] + [f]
-            g = plano.valor(novo) - base
+            g = plano.valor(novo) - base - VIES_LIVRE
             if melhor is None or g > melhor["ganho"]:
                 melhor = {"add": f, "drop": d, "ganho": g, "de": quem.get(f, "?")}
         if melhor and melhor["ganho"] >= minimo:
@@ -191,9 +199,29 @@ def linhas_claims(ctx, cl: list[dict]) -> list[str]:
         saida = f"dispensando {esc(ctx.name(d))}" if d else "na vaga livre"
         L.append(f"🟡 <b>{esc(ctx.name(f))}</b> <i>{esc(ctx.pos(f))} · {esc(ctx.team(f))}</i>")
         L.append(f"      🔁 {saida}")
-        L.append(f"      📊 <b>{n(r['ganho'], 1, True)}</b> pts/semana · "
-                 f"<i>saiu do {esc(r['de'])}</i>")
+        origem = (f"saiu do {esc(r['de'])}" if r["de"] != "?"
+                  else "em waiver porque o jogo dele já começou")
+        L.append(f"      📊 <b>{n(r['ganho'], 1, True)}</b> pts/semana · <i>{origem}</i>")
         L.append("")
+    return L
+
+
+def relatorio_waiver(ctx, est, abertos, congelados, usados, jogos_noite=()) -> list[str]:
+    """Adds (livres, entram na hora) e claims (em waiver). Quem e livre e
+    jogou na rodada da noite foi pra waiver quando o jogo comecou: vira
+    claim, nao add."""
+    times = {t for j in jogos_noite for t in j.times if j.comecou(ctx.agora)}
+    livres = ctx.sl.free_agents(ctx.pool)
+    waiver = em_waiver(ctx) | {p for p in livres if ctx.team(p) in times}
+    fa = [p for p in livres if p not in waiver]
+    L = []
+    picks = pickups(ctx, est, abertos, congelados, usados, fa, limite=4) if abertos else []
+    if picks:
+        L += linhas_pickups(ctx, picks, "Adds", "➕", "livres: entram na hora · semana + temporada")
+    L += linhas_claims(ctx, claims(ctx, est, waiver))
+    if not L and jogos_noite:
+        L += secao("📝", "Waiver")
+        L.append("<i>nenhum livre nem claim melhora o time agora</i>")
     return L
 
 
@@ -232,7 +260,7 @@ def main_with(args, config=None) -> int:
             print(f"[{ctx.rotulo}] relatorio do dia ja saiu")
             return 0
 
-    enquete.sincronizar(ctx.cfg)
+    enquete.sincronizar(ctx.cfg, avisar=not ctx.args.dry_run)
     est = estado(ctx)
     if not est.elenco:
         # Antes do draft o elenco e vazio e todo livre "melhora o time".
@@ -244,8 +272,7 @@ def main_with(args, config=None) -> int:
     dia = proximo_dia(ctx, est)
     alvo = replace(est, hoje=dia) if dia else est
     e, mud, ganho, hoje_op, futuro, abertos, congelados, usados = escalacao_hoje(ctx, alvo, decs)
-    waiver = em_waiver(ctx)
-    fa = [p for p in ctx.sl.free_agents(ctx.pool) if p not in waiver]
+    fa = ctx.sl.free_agents(ctx.pool)
 
     L = [titulo("DIA", ctx.league_name, ctx.hora(ctx.agora, "%a %d/%m"))]
     jogo_hoje = dia == est.hoje and bool(hoje_op)
@@ -260,9 +287,10 @@ def main_with(args, config=None) -> int:
     elif est.abertos:
         L += sem_jogo_hoje(ctx, dia, mud, hoje_op, set(e.segurados.values()))
 
-    picks = pickups(ctx, est, abertos, congelados, usados, fa, limite=4) if abertos else []
-    if picks:
-        L += linhas_pickups(ctx, picks, "Adds", "➕", "semana + temporada")
+    # Adds e claims vem no fim da noite; aqui so se a da noite nao saiu
+    ontem = (date.fromisoformat(hoje_et(ctx.agora)) - timedelta(days=1)).isoformat()
+    if not ja_avisado(AVISOS_NOITE, f"noite:{ontem}"):
+        L += relatorio_waiver(ctx, est, abertos, congelados, usados)
     sub = subindo(ctx, fa)
     if sub:
         L += secao("📈", "Livres subindo de papel")
@@ -271,9 +299,6 @@ def main_with(args, config=None) -> int:
     if meus:
         L += secao("👥", "Seu elenco")
         L += meus
-    cl = linhas_claims(ctx, claims(ctx, est, waiver))
-    if cl:
-        L += cl
     tr, propostas = trocas_da_semana(ctx)
     if tr:
         L += tr

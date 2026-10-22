@@ -276,10 +276,14 @@ def espn_dia(data: str, ttl_hours: float) -> list[dict]:
             comp = (ev.get("competitions") or [{}])[0]
             times = {c.get("homeAway"): (c.get("team") or {}).get("abbreviation")
                      for c in comp.get("competitors") or []}
-            st = ((ev.get("status") or {}).get("type") or {})
+            pts = {c.get("homeAway"): c.get("score") for c in comp.get("competitors") or []}
+            status = ev.get("status") or {}
+            st = status.get("type") or {}
             out.append({"tip": ev.get("date"), "home": times.get("home"),
                         "away": times.get("away"), "state": st.get("state"),
-                        "completed": bool(st.get("completed"))})
+                        "completed": bool(st.get("completed")),
+                        "period": status.get("period"), "clock": status.get("clock"),
+                        "home_score": pts.get("home"), "away_score": pts.get("away")})
         return out
     try:
         return _cached(f"espn_{data}", ttl_hours, baixar)
@@ -289,7 +293,8 @@ def espn_dia(data: str, ttl_hours: float) -> list[dict]:
             guardado = json.loads(velho.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise erro from None
-        return [dict(e, state="", completed=False) for e in guardado]
+        return [dict(e, state="", completed=False, period=None, clock=None,
+                     home_score=None, away_score=None) for e in guardado]
 
 
 def espn_lesoes(ttl_hours: float = 1.0) -> list[dict]:

@@ -63,6 +63,9 @@ class Estado:
     # slot -> (jogador, placar, data do jogo): talvez travado, sem voto ainda
     pendentes: dict[int, tuple[str, float, str]] = field(default_factory=dict)
     roster_id: int | None = None
+    # pontos de cada jogador no confronto (`players_points`): durante o jogo,
+    # o placar ao vivo
+    pontos_conf: dict[str, float] = field(default_factory=dict)
 
     def usados(self) -> set[str]:
         return {p for p, _ in self.travados.values()}
@@ -77,6 +80,19 @@ class Estado:
     def ultimo_encerrado(self, pid: str, agora) -> Jogo | None:
         fins = [j for j in self.jogos.get(pid, []) if j.acabou(agora)]
         return fins[-1] if fins else None
+
+    def feito_ao_vivo(self, pid: str, jogo: Jogo, agora) -> float:
+        """Quanto ele ja fez no jogo em andamento. O log tem a linha do dia
+        (sem ambiguidade); sem ela, o confronto, desde que nao seja o placar
+        do jogo anterior ainda la."""
+        if (pid, jogo.data) in self.placar:
+            return self.placar[(pid, jogo.data)]
+        pp = self.pontos_conf.get(pid)
+        ant = self.ultimo_encerrado(pid, agora)
+        velho = self.placar.get((pid, ant.data)) if ant else None
+        if pp is None or (velho is not None and abs(pp - velho) < 0.05):
+            return 0.0
+        return float(pp)
 
 
 def estado(ctx) -> Estado:
@@ -106,6 +122,8 @@ def estado(ctx) -> Estado:
                 pontos_slot = list((m.get("starters_points") or []) + [0.0] * len(slots))[:len(slots)]
                 titulares_conf = [(p if p and p != "0" else None)
                                   for p in (m.get("starters") or [])] + [None] * len(slots)
+                est.pontos_conf = {str(k): float(v or 0.0)
+                                   for k, v in (m.get("players_points") or {}).items()}
                 break
     except Exception as e:
         ctx.warnings.append(f"confronto indisponivel ({e}); assumindo nada travado")
@@ -174,6 +192,13 @@ def jogos_hoje(ctx, est: Estado, pids) -> dict[str, Opcao]:
             if j.data == est.hoje and not j.comecou(ctx.agora):
                 out[p] = opcao(ctx, p, j)
     return out
+
+
+def semanas_horizonte(ctx, semanas: int | None = None) -> int:
+    """Quantas semanas o valor_temporada soma (as que faltam, ate o horizonte)."""
+    semanas = semanas or int((ctx.cfg.get("waivers") or {}).get("horizonte_semanas") or 6)
+    ultimo = max((j.week for j in ctx.agenda.jogos), default=ctx.week)
+    return max(0, min(ultimo, ctx.week + semanas) - ctx.week)
 
 
 def valor_temporada(ctx, pid: str, semanas: int | None = None) -> float:
