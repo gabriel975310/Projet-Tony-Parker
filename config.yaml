@@ -58,9 +58,13 @@ waivers:
   horizonte_semanas: 6
 
 trocas:
-  # Uma vez por semana no relatorio do dia (1 = segunda, 0 = domingo), ate o
-  # prazo de trocas da liga. Tambem roda na mao: python trocas.py --dry-run
+  # A lista inteira uma vez por semana no relatorio do dia (1 = segunda,
+  # 0 = domingo), ate o prazo de trocas da liga. Tambem roda na mao:
+  # python trocas.py --dry-run
   dia_semana: 1
+  # Nos outros dias o relatorio refaz a conta e so mostra a proposta que
+  # nunca foi sugerida (nenhuma repete no meio da semana). false = so segunda.
+  novidades: true
   # Pontos por semana no titular, na media das proximas N semanas.
   horizonte_semanas: 10
   # A troca passa quando voce ganha pelo menos isso por semana e eles nao

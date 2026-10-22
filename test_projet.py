@@ -419,6 +419,33 @@ def test_troca_so_passa_quando_os_dois_lados_aguentam():
     assert a2 and all("a" not in t["manda"] for t in a2)
 
 
+def test_troca_ja_sugerida_nao_volta_no_meio_da_semana(monkeypatch, tmp_path):
+    import run_dia
+    from contexte import marcar_avisado
+    from trocas import chave_proposta
+    velha = {"rid": 2, "manda": ["b", "a"], "recebe": ["y"]}
+    nova = {"rid": 3, "manda": ["x"], "recebe": ["z"]}
+    monkeypatch.setattr(run_dia, "AVISOS_TROCAS", tmp_path / "t.json")
+    monkeypatch.setattr(run_dia, "calcular_trocas", lambda ctx: ([velha, nova], 0, 10))
+    monkeypatch.setattr(run_dia, "linhas_trocas",
+                        lambda ctx, tops, semanas, rotulo: [rotulo] if tops else [])
+    marcar_avisado(tmp_path / "t.json", chave_proposta(dict(velha, manda=["a", "b"])))
+    dia = {"w": "1"}
+    ctx = SimpleNamespace(cfg={"trocas": {"dia_semana": 1}}, agora=None, week=1,
+                          warnings=[], hora=lambda t, f: dia["w"],
+                          sl=SimpleNamespace(settings=lambda: {"trade_deadline": 15}))
+    L, ks = run_dia.trocas_da_semana(ctx)                       # segunda: a lista inteira
+    assert L == ["Trocas"] and len(ks) == 2
+    dia["w"] = "3"
+    L, ks = run_dia.trocas_da_semana(ctx)                       # quarta: so a nova
+    assert L == ["Troca nova"] and ks == [chave_proposta(nova)]
+    marcar_avisado(tmp_path / "t.json", ks[0])
+    assert run_dia.trocas_da_semana(ctx) == ([], [])            # nada novo: silencio
+    ctx.cfg["trocas"]["novidades"] = False
+    monkeypatch.setattr(run_dia, "calcular_trocas", lambda ctx: 1 / 0)
+    assert run_dia.trocas_da_semana(ctx) == ([], [])            # desligado: nem calcula
+
+
 def test_horario_guardado_vale_quando_a_espn_cai(monkeypatch, tmp_path):
     import json
     import requests

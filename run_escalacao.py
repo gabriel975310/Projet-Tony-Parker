@@ -418,29 +418,46 @@ def linhas_trocas_rodada(ctx, est, e, hoje) -> list[str]:
 
 
 def linhas_folga(ctx, est, e, hoje) -> list[str]:
-    """Quem nao joga hoje: titulares de slot aberto e banco, com os dias que
-    ainda jogam na semana. Travado nao entra: o slot dele ja acabou."""
+    """Quem nao joga mais hoje: titulares de slot aberto e banco. Quem tem
+    jogo hoje que ja comecou sai em "ja foram pra quadra" (com o placar, se
+    acabou); quem nao tem jogo hoje, com os dias que ainda joga na semana.
+    Travado nao entra: o slot dele ja acabou."""
     def prox(p):
         js = [j for j in est.restantes(p, ctx.agora) if j.data > est.hoje]
         return ", ".join(ctx.hora(j.inicio, "%a") for j in js) or "sem jogo na semana"
 
+    def jogo_de_hoje(p):
+        return next((j for j in est.jogos.get(p, [])
+                     if j.data == est.hoje and j.comecou(ctx.agora)), None)
+
+    def quadra(p):
+        j = jogo_de_hoje(p)
+        if not j.acabou(ctx.agora):
+            return f"jogando desde {ctx.hora(j.inicio, '%H:%M')}"
+        pts = est.placar.get((p, j.data))
+        return f"jogou hoje{f': {n(pts)}' if pts is not None else ''}"
+
     escalados = {p for p in e.lineup if p} | est.usados()
-    tit = [f"<code>{est.slots[i]}</code> {esc(ctx.name(e.lineup[i]))} <i>({prox(e.lineup[i])})</i>"
-           for i in est.abertos
+    tit = [(f"<code>{est.slots[i]}</code> ", e.lineup[i]) for i in est.abertos
            if i < len(e.lineup) and e.lineup[i] and e.lineup[i] not in hoje
            and i not in e.segurados]
-    banco = [f"{esc(ctx.name(p))} <i>({prox(p)})</i>" for p in est.elenco
-             if p not in escalados and p not in hoje]
-    if not tit and not banco:
-        return []
-    L = secao("💤", "Não jogam hoje")
-    if tit:
-        L.append("<b>Titulares</b>")
-        L += [f"      {x}" for x in tit]
-        L.append("")
-    if banco:
-        L.append("<b>Banco</b>")
-        L += [f"      {x}" for x in banco]
+    banco = [("", p) for p in est.elenco if p not in escalados and p not in hoje]
+    L = []
+    for icone, titulo_, quem, rotulo in (
+            ("⏱", "Já foram pra quadra hoje", lambda p: jogo_de_hoje(p), quadra),
+            ("💤", "Não jogam hoje", lambda p: not jogo_de_hoje(p), prox)):
+        t = [f"{s}{esc(ctx.name(p))} <i>({rotulo(p)})</i>" for s, p in tit if quem(p)]
+        b = [f"{esc(ctx.name(p))} <i>({rotulo(p)})</i>" for _, p in banco if quem(p)]
+        if not t and not b:
+            continue
+        L += secao(icone, titulo_)
+        if t:
+            L.append("<b>Titulares</b>")
+            L += [f"      {x}" for x in t]
+            L.append("")
+        if b:
+            L.append("<b>Banco</b>")
+            L += [f"      {x}" for x in b]
     return L
 
 

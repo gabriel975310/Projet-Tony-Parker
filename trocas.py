@@ -217,11 +217,17 @@ def calcular(ctx) -> tuple[list[dict], int, int]:
     return tops, testadas, semanas
 
 
-def linhas(ctx, tops: list[dict], semanas: int) -> list[str]:
+def chave_proposta(t: dict) -> str:
+    """A mesma troca (time + quem vai + quem vem) tem sempre a mesma chave,
+    pra nao ser sugerida de novo no meio da semana."""
+    return f"proposta:{t['rid']}:{','.join(sorted(t['manda']))}:{','.join(sorted(t['recebe']))}"
+
+
+def linhas(ctx, tops: list[dict], semanas: int, rotulo: str = "Trocas") -> list[str]:
     if not tops:
         return []
     nomes = ctx.sl.team_names()
-    L = secao("🔁", "Trocas", f"pts/semana no Lock-In, próximas {semanas} semanas")
+    L = secao("🔁", rotulo, f"pts/semana no Lock-In, próximas {semanas} semanas")
     for t in tops:
         manda = " + ".join(f"{esc(ctx.name(p))} <i>{esc(ctx.pos(p))}</i>" for p in t["manda"])
         recebe = " + ".join(f"<b>{esc(ctx.name(p))}</b> <i>{esc(ctx.pos(p))}</i>"

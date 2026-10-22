@@ -12,7 +12,8 @@ cuida do que trava hoje a noite; aqui e o que pede calma:
   * seu elenco: quem esta subindo ou caindo de papel;
   * CLAIMS: dispensados pela liga nos ultimos dias (ficam em waiver) que
     melhoram o seu titular de temporada, com quem sai no lugar;
-  * TROCAS, uma vez por semana (segunda), ate o prazo da liga.
+  * TROCAS, ate o prazo da liga: a lista inteira na segunda e, nos outros
+    dias, so a proposta que ainda nao foi sugerida.
 
     python run_dia.py --dry-run
 """
@@ -32,7 +33,9 @@ from run_escalacao import (em_waiver, escalacao_hoje, linhas_lineup, linhas_muda
                            linhas_pickups, linhas_travados, pickups, prazo_mudancas,
                            travas)
 from semana import estado
+from trocas import AVISOS as AVISOS_TROCAS
 from trocas import calcular as calcular_trocas
+from trocas import chave_proposta
 from trocas import linhas as linhas_trocas
 from trocas import Plano
 
@@ -194,19 +197,26 @@ def linhas_claims(ctx, cl: list[dict]) -> list[str]:
     return L
 
 
-def trocas_da_semana(ctx) -> list[str]:
-    """Segunda-feira (dia em que a semana do Lock-In comeca), ate o prazo."""
+def trocas_da_semana(ctx) -> tuple[list[str], list[str]]:
+    """(linhas, chaves das propostas mostradas), ate o prazo. Segunda-feira
+    (dia em que a semana do Lock-In comeca) vem a lista inteira; nos outros
+    dias so a proposta que nunca foi sugerida (uma lesao, um livre que
+    alguem pegou), e nada se nao tiver novidade."""
     cfg = ctx.cfg.get("trocas") or {}
-    if int(ctx.hora(ctx.agora, "%w")) != int(cfg.get("dia_semana", 1)):
-        return []
+    segunda = int(ctx.hora(ctx.agora, "%w")) == int(cfg.get("dia_semana", 1))
+    if not segunda and not cfg.get("novidades", True):
+        return [], []
     if ctx.week > int(ctx.sl.settings().get("trade_deadline") or 99):
-        return []
+        return [], []
     try:
         tops, _, semanas = calcular_trocas(ctx)
     except Exception as e:
         ctx.warnings.append(f"trocas nao calculadas ({e})")
-        return []
-    return linhas_trocas(ctx, tops, semanas)
+        return [], []
+    if not segunda:
+        tops = [t for t in tops if not ja_avisado(AVISOS_TROCAS, chave_proposta(t))]
+    rotulo = "Trocas" if segunda else ("Trocas novas" if len(tops) > 1 else "Troca nova")
+    return linhas_trocas(ctx, tops, semanas, rotulo), [chave_proposta(t) for t in tops]
 
 
 def main_with(args, config=None) -> int:
@@ -264,12 +274,14 @@ def main_with(args, config=None) -> int:
     cl = linhas_claims(ctx, claims(ctx, est, waiver))
     if cl:
         L += cl
-    tr = trocas_da_semana(ctx)
+    tr, propostas = trocas_da_semana(ctx)
     if tr:
         L += tr
     ok = ctx.notify(bloco(L) + rodape(ctx.warnings))
     if ok:
         marcar_avisado(AVISOS, chave)
+        for k in propostas:
+            marcar_avisado(AVISOS_TROCAS, k)
     return 0
 
 
