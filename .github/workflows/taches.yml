@@ -68,15 +68,29 @@ jobs:
       - name: dependencias
         run: pip install -r requirements-runtime.txt
 
+      # Mesmo grupo do `concurrency` la em cima.
+      - name: grupo
+        id: grupo
+        run: echo "nome=${{ (startsWith(github.event.schedule, '7,22,37,52') || github.event.inputs.comando == 'run_draft' || github.event.inputs.comando == 'vigia_draft') && 'draft' || 'jogo' }}" >> "$GITHUB_OUTPUT"
+
       # Logs jogo a jogo (semana fechada nao muda, fica pra sempre), dump de
-      # jogadores, e os arquivos de "ja avisei" e das decisoes de trava — que
-      # e o que faz o bot ler um placar provisorio como provisorio.
+      # jogadores, e os arquivos de "ja avisei", das decisoes de trava e da
+      # enquete — que e o que faz o bot ler um placar provisorio como
+      # provisorio.
+      #
+      # Um cache por grupo. Com um so, o vigia do draft (que roda junto, no
+      # outro grupo) restaurava a copia de antes, salvava por ultimo, e o
+      # job seguinte da noite voltava pra ela: perdia voto da enquete (e a
+      # propria enquete), e o bot perguntava de novo quem ja tinha travado
+      # (Maxey, 23/10/2026).
       - name: cache de dados
         uses: actions/cache@v4
         with:
           path: ~/.cache_projet
-          key: cache-projet-${{ github.run_id }}
-          restore-keys: cache-projet-
+          key: cache-projet-${{ steps.grupo.outputs.nome }}-${{ github.run_id }}
+          restore-keys: |
+            cache-projet-${{ steps.grupo.outputs.nome }}-
+            cache-projet-
 
       - name: rodar
         run: |
