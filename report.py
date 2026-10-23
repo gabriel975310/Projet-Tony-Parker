@@ -25,7 +25,8 @@ def n(v, casas: int = 1, sinal: bool = False) -> str:
     return s.replace(".", ",")
 
 
-ICONE_TITULO = {"DIA": "☀️", "LOCK-IN": "🔐", "FIM DA NOITE": "🌙", "TROCAS": "🔁", "DRAFT": "🏀"}
+ICONE_TITULO = {"DIA": "☀️", "LOCK-IN": "🔐", "FIM DA NOITE": "🌙", "TROCAS": "🔁", "DRAFT": "🏀",
+                "LEMBRETE": "⏰"}
 SEPARADOR = "━━━━━━━━━━━━━━━"
 
 

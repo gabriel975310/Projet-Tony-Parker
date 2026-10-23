@@ -109,16 +109,20 @@ jobs:
             fi
             exit 0
           fi
+          # O cron do draft so vigia o draft. Ele restaura o cache do grupo
+          # dele, onde os avisos e os votos da noite nao estao: rodando a
+          # escalacao e o dia ali, o gate achava tudo novo e reenviava o
+          # relatorio com votos velhos (23/10/2026, 14h31).
+          if [ "${{ steps.grupo.outputs.nome }}" = "draft" ]; then
+            python run_draft.py --gate --watch 50 --so-perto
+            exit 0
+          fi
           # Toda entrega roda todos os runners; o gate de cada um decide.
           # Um que quebra nao cala os outros, mas deixa o job vermelho no fim
           # (com `|| true` puro, crash e silencio ficariam iguais).
           FALHOU=""
           python run_escalacao.py --gate || FALHOU="$FALHOU run_escalacao"
           python run_dia.py --gate || FALHOU="$FALHOU run_dia"
-          case "${{ github.event.schedule }}" in
-            "7,22,37,52 "*)
-              python run_draft.py --gate --watch 50 --so-perto ;;
-          esac
           if [ -n "$FALHOU" ]; then
             echo "::error::runner quebrou:$FALHOU"
             exit 1

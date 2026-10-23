@@ -65,6 +65,13 @@ JANELA_ESCALACAO_H = 6
 # e 20 minutos antes: sobra pelo menos 15 pra mexer no app.
 JANELA_TROCA_MIN = 35
 
+# A escalacao do dia sai uma vez so. Se ate tantos minutos antes do prazo a
+# troca ainda nao foi feita no Sleeper, sai um lembrete (o KAT ficou no banco
+# no jogo das 20h de 23/10/2026: a troca estava avisada desde a manha). De
+# 15 em 15 minutos, o primeiro cai entre 45 e 30 minutos antes; se um
+# disparo falhar, o seguinte ainda chega com 15.
+JANELA_LEMBRETE_MIN = 45
+
 SUFIXOS = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
 
 
@@ -196,9 +203,11 @@ def linhas_travas(ctx, est, decs, ocupa: dict[str, tuple[str, float]] | None = N
             de = f" <i>(jogo de {ctx.hora(j.inicio, '%a')})</i>" if j else ""
             L.append(f"{novo}🔒 <b>TRAVE {nome}</b> no <code>{destino}</code> · "
                      f"<b>{n(t.pontos)}</b> pts{de}")
+            # Sem nomes: qualquer um que cabe no slot pode entrar nele; o
+            # plano so diz quem provavelmente entra (23/10/2026).
             if quem:
-                L.append(f"      <i>se esperar, o {destino} rende ~{n(t.limiar)} "
-                         f"({esc(quem.replace(', ', ' ou '))}): só {round(100 * chance)}% de chance "
+                L.append(f"      <i>se esperar, o {destino} rende ~{n(t.limiar)} no resto da semana: "
+                         f"{'só ' if chance < 0.5 else ''}{round(100 * chance)}% de chance "
                          f"de passar de {n(t.pontos)}</i>")
             else:
                 L.append(f"      <i>esperar rende ~{n(t.limiar)}</i>")
@@ -324,30 +333,23 @@ def linhas_mudancas(ctx, mud, hoje, segurados=()) -> list[str]:
     return L
 
 
-def reserva_tarde(ctx, slot: str, o, hoje, titulares) -> str | None:
-    """Quem do banco cabe no slot e joga depois que o jogo `o` acaba.
-
-    Sem ninguem assim, nao ha troca na mesma noite: o slot so e refeito na
-    escalacao do dia seguinte.
-    """
-    fim = o.inicio + DURACAO
-    cands = [p for p, op in hoje.items() if p not in titulares and op.inicio >= fim
-             and cabe(ctx.posicoes(p), slot)]
-    return max(cands, key=lambda p: hoje[p].mu, default=None)
-
-
-def planos_b(ctx, est, e, hoje) -> dict[int, str | None]:
-    """{slot: quem do banco entra se o titular de hoje nao chegar no alvo}."""
-    titulares = set(e.hoje.values())
-    return {i: reserva_tarde(ctx, est.slots[i], hoje[p], hoje, titulares)
-            for i, p in e.hoje.items()
-            if i not in e.segurados and (e.limiar.get(i) or 0) >= 0.5}
+def linhas_lembrete(ctx, mud, hoje) -> list[str]:
+    L = secao("⏰", "Falta mexer no Sleeper", "a escalação ainda está como antes")
+    for (i, slot, a, b) in mud:
+        sai = f"tire {esc(ctx.name(a))}, " if a else ""
+        entra = f"ponha <b>{esc(ctx.name(b))}</b>" if b else "deixe vazio"
+        L.append(f"      • <code>{slot}</code>: {sai}{entra} · "
+                 f"<b>até {ctx.hora(prazo_mudancas([(i, slot, a, b)], hoje), '%H:%M')}</b>")
+    L.append("")
+    return L
 
 
 def linhas_plano_dia(ctx, est, e, mud, hoje, decs=(), titulo_txt="Escalação de hoje"
                      ) -> list[str]:
-    """O plano do dia em topicos: o que mexer agora, o alvo de cada um e o
-    plano B de quem nao chegar. Mesma forma de manha e de hora em hora.
+    """O plano do dia em topicos: o que mexer agora e o alvo de cada um.
+    Mesma forma de manha e de hora em hora. Quem entra no lugar de quem nao
+    chegar sai na hora (substituicoes), com o placar de verdade: de manha
+    "troque o Giddey pelo Acuff" so confunde.
 
     Quem esta pra travar o placar de um jogo anterior nao entra: o jogo de
     hoje dele nao conta, e o lembrete fica no painel da semana.
@@ -385,28 +387,9 @@ def linhas_plano_dia(ctx, est, e, mud, hoje, decs=(), titulo_txt="Escalação de
             L += [f"         {x.strip()}" for x in noticia(ctx, p, jogo)]
         L.append("")
 
-    reservas = planos_b(ctx, est, e, hoje)
-    if reservas:
-        L.append("🔁 <b>Se não chegar:</b> <i>não trave e, quando o jogo acabar, ponha:</i>")
-        por_reserva: dict[str, list[int]] = {}
-        sem = []
-        for i, p in jogam:
-            if i not in reservas:
-                continue
-            if reservas[i]:
-                por_reserva.setdefault(reservas[i], []).append(i)
-            else:
-                sem.append(i)
-        for r, slots in por_reserva.items():
-            quem = " ou ".join(sobrenome(ctx.name(e.hoje[i])) for i in slots)
-            extra = " (no primeiro que abrir)" if len(slots) > 1 else ""
-            L.append(f"      • {quem} → <b>{esc(ctx.name(r))}</b> "
-                     f"<i>{ctx.hora(hoje[r].inicio, '%H:%M')}</i>{extra}")
-        if sem:
-            quem = ", ".join(sobrenome(ctx.name(e.hoje[i])) for i in sem)
-            L.append(f"      • {quem}: ninguém do banco joga depois, o slot fica pra amanhã")
-        if por_reserva:
-            L.append("<i>      o reserva só trava se for bem · eu aviso na hora</i>")
+    if any((e.limiar.get(i) or 0) >= 0.5 for i in e.hoje):
+        L.append("<i>ℹ️ fez menos que o alvo? não trave. Se alguém do banco puder "
+                 "entrar no lugar, eu aviso na hora.</i>")
         L.append("")
 
     fora = [f"<code>{est.slots[i]}</code> {esc(ctx.name(e.lineup[i])) if e.lineup[i] else 'vazio'}"
@@ -868,25 +851,35 @@ def main_with(args, config=None) -> int:
     estaciona = any(b in e.segurados.values() for _, _, _, b in mud)
     manda_esc = bool(mud_novo) and (ganho >= minimo or estaciona) and (
         not gate or (perto and not ja_avisado(AVISOS, chave_esc)))
+    lembra = lambda i, b: f"lembra:{est.hoje}:{i}:{b}"
+
+    def em_cima(m) -> bool:
+        pz = prazo_mudancas([m], hoje)
+        return pz is not None and timedelta(0) < pz - ctx.agora <= timedelta(minutes=JANELA_LEMBRETE_MIN)
+    # o Sleeper ainda nao tem a troca e o prazo dela esta perto
+    lembretes = [m for m in mud if gate and (ganho >= minimo or estaciona) and em_cima(m)
+                 and not ja_avisado(AVISOS, lembra(m[0], m[3]))]
     subs_novas = [x for x in subs if not gate or not ja_avisado(AVISOS, entra(x["i"], x["b"]))]
     chaves_pick = [f"add:{est.hoje}:{r['add']}:{r['drop']}" for r in picks]
     picks_novos = [r for r, k in zip(picks, chaves_pick)
                    if not gate or (perto and not ja_avisado(AVISOS, k))]
 
-    if gate and not (subs_novas or manda_esc or picks_novos or urgentes or manda_noite):
+    if gate and not (subs_novas or manda_esc or lembretes or picks_novos or urgentes or manda_noite):
         print(f"[{ctx.rotulo}] nada novo a decidir "
               f"(travados {len(est.travados)}/{len(est.slots)}, {len(novos)} trava(s) "
               f"esperando o fim da noite, proximo tip {ctx.hora(proximo_tip)})")
         mandar_enquete(ctx, est, decs, ate)
         return 0
 
-    tipo = "FIM DA NOITE" if manda_noite else "LOCK-IN"
+    tipo = ("FIM DA NOITE" if manda_noite else "LEMBRETE"
+            if lembretes and not (subs_novas or manda_esc or picks_novos or urgentes) else "LOCK-IN")
     L = [titulo(tipo, ctx.league_name, ctx.hora(ctx.agora, "%a %d/%m %H:%M"))]
     # O painel da semana sai no fim da noite (e na mao); no meio do dia a
     # mensagem e so o que mudou.
     if manda_noite or not gate:
         L += painel(ctx, est, decs)
-    rec = recentes(ctx, est, decs)
+    # o lembrete sozinho e so o que mexer: as travas esperam o fim da noite
+    rec = recentes(ctx, est, decs) if tipo != "LEMBRETE" else []
     if rec:
         # o que entrou desde a ultima mensagem vai primeiro, com 🆕
         marca = novos & {t.pid for t in rec}
@@ -896,6 +889,9 @@ def main_with(args, config=None) -> int:
                            quem_ocupa(ctx, est, decs), marca)
     if subs_novas:
         L += linhas_substituicoes(ctx, est, subs_novas)
+    if lembretes and not manda_esc:
+        # a escalacao nova ja diz "mexa ate"; sem ela, o lembrete vai primeiro
+        L[1:1] = linhas_lembrete(ctx, lembretes, hoje)
     if e.hoje and (manda_esc or not gate):
         L += linhas_plano_dia(ctx, est, e, mud, hoje, decs,
                               "Escalação de hoje (mudou)" if gate else "Escalação de hoje")
@@ -908,7 +904,7 @@ def main_with(args, config=None) -> int:
     ok = ctx.notify(msg)
 
     if ok:
-        for t in decs:
+        for t in decs if tipo != "LEMBRETE" else ():
             chave, j = chaves_trava[t.pid]
             marcar_avisado(AVISOS, chave)
             if j:
@@ -919,6 +915,8 @@ def main_with(args, config=None) -> int:
             for i, _, _, b in mud:
                 if b:
                     marcar_avisado(AVISOS, entra(i, b))
+        for i, _, _, b in lembretes:
+            marcar_avisado(AVISOS, lembra(i, b))
         for x in subs_novas:
             marcar_avisado(AVISOS, entra(x["i"], x["b"]))
         for r in picks_novos:
