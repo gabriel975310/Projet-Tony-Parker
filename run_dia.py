@@ -34,9 +34,9 @@ from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_eac
 from report import bloco, n, rodape, secao, titulo
 import enquete
 from run_escalacao import AVISOS as AVISOS_NOITE
-from run_escalacao import (em_waiver, escalacao_hoje, linhas_lineup, linhas_mudancas,
-                           linhas_pickups, linhas_travados, pickups, prazo_mudancas,
-                           travas)
+from run_escalacao import (chave_escalacao, em_waiver, escalacao_hoje, linhas_mudancas,
+                           linhas_pickups, linhas_plano_dia, linhas_travados, pickups,
+                           prazo_mudancas, travas)
 from semana import estado
 from trocas import AVISOS as AVISOS_TROCAS
 from trocas import calcular as calcular_trocas
@@ -281,9 +281,9 @@ def main_with(args, config=None) -> int:
         if est.abertos and dia:
             nota += f" · os slots abertos ainda devem render ~{n(e.valor_semana)}"
         L += secao("📊", f"Semana {est.week}", nota)
-        L += linhas_travados(ctx, est)
+        L += linhas_travados(ctx, est, decs)
     if jogo_hoje:
-        L += linhas_lineup(ctx, alvo, e, mud, ganho, hoje_op, decs)
+        L += linhas_plano_dia(ctx, alvo, e, mud, hoje_op, decs)
     elif est.abertos:
         L += sem_jogo_hoje(ctx, dia, mud, hoje_op, set(e.segurados.values()))
 
@@ -305,6 +305,12 @@ def main_with(args, config=None) -> int:
     ok = ctx.notify(bloco(L) + rodape(ctx.warnings))
     if ok:
         marcar_avisado(AVISOS, chave)
+        if jogo_hoje:
+            # a de hora em hora so repete a escalacao se ela mudar
+            marcar_avisado(AVISOS_NOITE, chave_escalacao(alvo, mud))
+            for i, _, _, b in mud:
+                if b:
+                    marcar_avisado(AVISOS_NOITE, f"entra:{alvo.hoje}:{i}:{b}")
         for k in propostas:
             marcar_avisado(AVISOS_TROCAS, k)
     return 0
