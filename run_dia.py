@@ -283,7 +283,7 @@ def main_with(args, config=None) -> int:
         L += secao("📊", f"Semana {est.week}", nota)
         L += linhas_travados(ctx, est)
     if jogo_hoje:
-        L += linhas_lineup(ctx, alvo, e, mud, ganho, hoje_op)
+        L += linhas_lineup(ctx, alvo, e, mud, ganho, hoje_op, decs)
     elif est.abertos:
         L += sem_jogo_hoje(ctx, dia, mud, hoje_op, set(e.segurados.values()))
 
