@@ -14,6 +14,10 @@ tres titulares com placar, um so travado). Entao:
   * placar do ultimo jogo, com o proximo ainda por comecar -> pode ser so o
     provisorio: vale a enquete (enquete.py). Sem voto, aberto e PENDENTE;
   * placar zero, ou batendo com jogo em andamento -> aberto.
+
+E travado nao destrava: quem voce disse que travou fica travado ate
+domingo, seja la o que o confronto mostre na madrugada (24/10/2026: NAW,
+travado e votado, parecia pendente de novo e ganhou uma enquete so dele).
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from clients import CACHE
 from lineup import starting_slots
 from lockin import Opcao, valor_semanal
 from contexte import ativos
-from enquete import respostas
+from enquete import respostas, travados_semana
 
 DECISOES = CACHE / "decisoes_trava.json"
 
@@ -129,9 +133,14 @@ def estado(ctx) -> Estado:
         ctx.warnings.append(f"confronto indisponivel ({e}); assumindo nada travado")
 
     votos = respostas()
+    ja_travou = travados_semana(week, votos)
     for i in range(len(slots)):
         p = titulares_conf[i] or atual[i]
         pts = float(pontos_slot[i] or 0.0)
+        if p in ja_travou:
+            est.travados[i] = (p, placar.get((p, ja_travou[p]), pts))
+            est.origem_trava[i] = "enquete"
+            continue
         if not p or abs(pts) < 1e-9:
             continue
         fins = [j for j in jogos.get(p, []) if j.acabou(agora)]

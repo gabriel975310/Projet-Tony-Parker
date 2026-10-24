@@ -15,6 +15,15 @@ Errou o voto? Da pra retirar o voto na propria enquete e votar de novo, ou
 mandar uma mensagem pro bot: "travei Queen", "nao travei Wilson" (varios
 separados por virgula, ou "travei todos"). A cada leitura nova o bot
 responde com o que anotou.
+
+Travado nao destrava: o que voce confirmou vale ate o fim da semana, mesmo
+que o confronto mostre outro placar no meio da madrugada. So "nao travei
+Fulano" desfaz.
+
+O getUpdates sem offset devolve as ultimas 24h, e nem sempre inteiras (5
+updates numa chamada, 1 na seguinte, 24/10/2026). Reaplicar o voto velho
+desfazia o novo; entao cada enquete guarda o update_id do ultimo voto lido e
+so aceita um mais novo.
 """
 
 from __future__ import annotations
@@ -37,9 +46,10 @@ def _ler() -> dict:
         d = json.loads(ARQ.read_text(encoding="utf-8"))
     except Exception:
         d = {}
-    d.setdefault("enquetes", {})     # poll_id -> {"chaves": [...], "votos": [...]}
+    d.setdefault("enquetes", {})     # poll_id -> {"chaves": [...], "votos": [...], "ult": update_id}
     d.setdefault("respostas", {})    # "week:pid:data" -> true/false
     d.setdefault("lidas", [])        # update_id das mensagens de texto ja lidas
+    d.setdefault("vistos", [])       # pendentes da passada anterior
     return d
 
 
@@ -56,6 +66,42 @@ def respostas() -> dict[str, bool]:
 
 def perguntadas() -> set[str]:
     return {k for e in _ler()["enquetes"].values() for k in e["chaves"]}
+
+
+def travados_semana(week: int, votos: dict[str, bool] | None = None) -> dict[str, str]:
+    """{pid: data do jogo} de quem voce disse que travou nesta semana.
+
+    So o voto, nao o placar: o "placar velho depois do jogo seguinte" atrasa
+    horas no Sleeper (Queen: 20,0 do jogo de 21/10 ate 24/10 de manha, depois
+    21,5 do de 23/10, sem jogo no meio). Guardado, prenderia um slot aberto
+    a semana inteira."""
+    votos = respostas() if votos is None else votos
+    out = {}
+    for k, travou in votos.items():
+        w, pid, data = k.split(":", 2)
+        if travou and w == str(week):
+            out.setdefault(pid, data)
+    return out
+
+
+def firmes(chaves: set[str]) -> set[str]:
+    """Os pendentes que ja eram pendentes na passada anterior. De madrugada o
+    confronto passa por placares provisorios, e um jogador que aparece numa
+    passada e some na outra virava uma enquete so dele."""
+    d = _ler()
+    antes = set(d["vistos"])
+    if antes != chaves:
+        d["vistos"] = sorted(chaves)
+        _gravar(d)
+    return chaves & antes
+
+
+def _esquecer(d: dict, chave: str) -> None:
+    """"nao travei Fulano": desfaz a trava dele na semana inteira."""
+    w, pid = chave.split(":")[:2]
+    for k in d["respostas"]:
+        if k.startswith(f"{w}:{pid}:"):
+            d["respostas"][k] = False
 
 
 def _tg(cfg) -> tuple[str, str]:
@@ -124,18 +170,20 @@ def sincronizar(cfg, avisar: bool = False) -> list[tuple[str, bool]]:
     nomes = {c: _nome(t) for e in d["enquetes"].values()
              for c, t in zip(e["chaves"], e.get("textos") or [])}
     mudou, anotado, faltou, ajuda = False, [], [], False
-    for u in ups:
+    for u in sorted(ups, key=lambda u: u.get("update_id") or 0):
         a = u.get("poll_answer")
         msg = u.get("message") or {}
         if a:
             e = d["enquetes"].get(a.get("poll_id"))
-            if not e:
-                continue
+            uid = u.get("update_id") or 0
+            if not e or uid <= e.get("ult", -1):
+                continue      # voto ja lido (ou mais velho que o lido)
+            e["ult"] = uid
+            mudou = True
             votos = sorted(a.get("option_ids") or [])
             if votos == e.get("votos"):
                 continue
             e["votos"] = votos
-            mudou = True
             for k, chave in enumerate(e["chaves"]):
                 if votos:
                     d["respostas"][chave] = k in votos
@@ -155,6 +203,8 @@ def sincronizar(cfg, avisar: bool = False) -> list[tuple[str, bool]]:
             feitos, nao_achou = lido
             faltou += nao_achou
             for chave, nome, travou in feitos:
+                if not travou:
+                    _esquecer(d, chave)
                 d["respostas"][chave] = travou
                 anotado.append((nome, travou))
     if mudou:

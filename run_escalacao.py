@@ -735,10 +735,13 @@ def mandar_enquete(ctx, est, decs, ate: str) -> None:
     agora = {t.pid: ("SEGURAR" if t.segurar else "TRAVAR" if t.travar else "PASSAR")
              for t in decs}
     ordem = {"travar": 3, "segurar": 2, None: 1, "passar": 0}
+    # so quem ja estava pendente na passada anterior (15-30 min antes)
+    firmes = enquete.firmes({f"{est.week}:{p}:{data}" for p, _, data in est.pendentes.values()
+                             if data <= ate})
     itens = []
     for i, (p, pts, data) in est.pendentes.items():
         chave = f"{est.week}:{p}:{data}"
-        if data > ate or chave in ja:
+        if chave not in firmes or chave in ja:
             continue
         antes = dec.get(chave)
         if antes:

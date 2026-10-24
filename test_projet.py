@@ -379,6 +379,13 @@ def test_status_da_espn_nao_vale_antes_do_tip():
 
 
 # -- leitura de trava (semana.py) ------------------------------------------
+@pytest.fixture(autouse=True)
+def _enquete_isolada(monkeypatch, tmp_path):
+    # semana.estado le a enquete: nunca no cache de verdade
+    import enquete
+    monkeypatch.setattr(enquete, "ARQ", tmp_path / "enquete.json")
+
+
 def _ctx_falso(starters_points, agora):
     import semana
     jogos = {
@@ -435,6 +442,23 @@ def test_placar_ao_vivo_nao_e_trava(monkeypatch):
     assert semana.estado(ctx).abertos == [0, 1]
 
 
+def test_voto_de_travado_vale_a_semana_inteira(monkeypatch):
+    # votou que travou o "a" no jogo de 26/10; de madrugada, depois do jogo
+    # de 28/10, o confronto mostra o placar novo: continua travado, sem enquete
+    semana, ctx = _ctx_falso([25.0, 0.0], T0 + timedelta(days=2, hours=4))
+    ctx.logs["a"].append(SimpleNamespace(data="2026-10-28", fp=25.0))
+    monkeypatch.setattr(semana, "respostas", lambda: {"2:a:2026-10-26": True})
+    est = semana.estado(ctx)
+    assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
+
+
+def test_enquete_so_pergunta_pendente_firme():
+    import enquete
+    assert enquete.firmes({"2:a:d", "2:b:d"}) == set()        # primeira vez
+    assert enquete.firmes({"2:a:d"}) == {"2:a:d"}             # o b sumiu
+    assert enquete.firmes({"2:a:d", "2:b:d"}) == {"2:a:d"}    # o b voltou: espera
+
+
 def test_escalacao_mexe_o_minimo():
     from lockin import _menos_mexidas
     slots = ["SG", "G", "UTIL"]
@@ -460,9 +484,28 @@ def test_voto_da_enquete_vira_resposta(monkeypatch, tmp_path):
     enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
     assert enquete.respostas() == {"1:a:d": False, "1:b:d": True}
     # "nenhum desses" (a ultima opcao): todos abertos
-    ups["result"][0]["poll_answer"]["option_ids"] = [2]
+    ups["result"].append({"update_id": 2, "poll_answer": {"poll_id": "P1", "option_ids": [2]}})
     enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
     assert enquete.respostas() == {"1:a:d": False, "1:b:d": False}
+    # o Telegram devolve so o voto velho (24/10/2026): nao desfaz o novo
+    ups["result"] = ups["result"][:1]
+    enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "c"}})
+    assert enquete.respostas() == {"1:a:d": False, "1:b:d": False}
+
+
+def test_nao_travei_desfaz_a_semana(monkeypatch, tmp_path):
+    import enquete
+    monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
+    enquete._gravar({"enquetes": {"P1": {"chaves": ["1:a:d2"], "votos": None,
+                                         "textos": ["Derik Queen · PF · 20,0 pts"]}},
+                     "respostas": {"1:a:d1": True}})
+    assert enquete.travados_semana(1) == {"a": "d1"}
+    ups = {"ok": True, "result": [{"update_id": 9, "message": {"chat": {"id": 42},
+                                                               "text": "nao travei queen"}}]}
+    monkeypatch.setattr(enquete.requests, "get",
+                        lambda *a, **k: SimpleNamespace(ok=True, json=lambda: ups))
+    enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "42"}})
+    assert enquete.travados_semana(1) == {}
 
 
 def test_mensagem_corrige_a_enquete(monkeypatch, tmp_path):
