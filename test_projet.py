@@ -381,7 +381,7 @@ def test_status_da_espn_nao_vale_antes_do_tip():
 # -- leitura de trava (semana.py) ------------------------------------------
 @pytest.fixture(autouse=True)
 def _enquete_isolada(monkeypatch, tmp_path):
-    # semana.estado le a enquete: nunca no cache de verdade
+    # semana.estado le e grava a memoria da enquete: nunca no cache de verdade
     import enquete
     monkeypatch.setattr(enquete, "ARQ", tmp_path / "enquete.json")
 
@@ -452,6 +452,27 @@ def test_voto_de_travado_vale_a_semana_inteira(monkeypatch):
     assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
 
 
+def test_trava_provada_fica_ate_o_fim_da_semana(monkeypatch):
+    # 28/10 acabou e o slot segue com o placar de 26/10: provado
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=4))
+    monkeypatch.setattr(semana, "respostas", lambda: {})
+    assert semana.estado(ctx).travados == {0: ("a", 30.0)}
+    # depois o slot passa a mostrar o jogo de 28/10 (Queen, 24/10/2026)
+    semana, ctx = _ctx_falso([25.0, 0.0], T0 + timedelta(days=2, hours=9))
+    ctx.logs["a"].append(SimpleNamespace(data="2026-10-28", fp=25.0))
+    est = semana.estado(ctx)
+    assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
+
+
+def test_placar_velho_no_comeco_do_jogo_nao_vira_memoria(monkeypatch):
+    # o 28/10 so comecou: prova a trava agora, mas nao fica guardada
+    import enquete
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=1))
+    monkeypatch.setattr(semana, "respostas", lambda: {})
+    assert semana.estado(ctx).travados == {0: ("a", 30.0)}
+    assert enquete.travados_semana(2) == {}
+
+
 def test_enquete_so_pergunta_pendente_firme():
     import enquete
     assert enquete.firmes({"2:a:d", "2:b:d"}) == set()        # primeira vez
@@ -498,7 +519,7 @@ def test_nao_travei_desfaz_a_semana(monkeypatch, tmp_path):
     monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
     enquete._gravar({"enquetes": {"P1": {"chaves": ["1:a:d2"], "votos": None,
                                          "textos": ["Derik Queen · PF · 20,0 pts"]}},
-                     "respostas": {"1:a:d1": True}})
+                     "respostas": {"1:a:d1": True}, "provados": {"1:a": "d1"}})
     assert enquete.travados_semana(1) == {"a": "d1"}
     ups = {"ok": True, "result": [{"update_id": 9, "message": {"chat": {"id": 42},
                                                                "text": "nao travei queen"}}]}
