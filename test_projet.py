@@ -381,9 +381,11 @@ def test_status_da_espn_nao_vale_antes_do_tip():
 # -- leitura de trava (semana.py) ------------------------------------------
 @pytest.fixture(autouse=True)
 def _enquete_isolada(monkeypatch, tmp_path):
-    # semana.estado le e grava a memoria da enquete: nunca no cache de verdade
+    # semana.estado le e grava a enquete e a escalacao: nunca no cache de verdade
     import enquete
+    import semana
     monkeypatch.setattr(enquete, "ARQ", tmp_path / "enquete.json")
+    monkeypatch.setattr(semana, "ESCALACOES", tmp_path / "escalacoes.json")
 
 
 def _ctx_falso(starters_points, agora):
@@ -452,25 +454,36 @@ def test_voto_de_travado_vale_a_semana_inteira(monkeypatch):
     assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
 
 
-def test_trava_provada_fica_ate_o_fim_da_semana(monkeypatch):
-    # 28/10 acabou e o slot segue com o placar de 26/10: provado
+def test_nao_da_enquete_vale_mais_que_o_placar(monkeypatch):
+    # KAT, 25/10/2026: o slot mostrou o placar de um jogo em que voce disse
+    # que ele nao travou
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=4))
+    monkeypatch.setattr(semana, "respostas", lambda: {"2:a:2026-10-26": False})
+    est = semana.estado(ctx)
+    assert est.travados == {} and est.pendentes == {}
+
+
+def test_quem_saiu_da_escalacao_nao_travou(monkeypatch):
     semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=4))
     monkeypatch.setattr(semana, "respostas", lambda: {})
-    assert semana.estado(ctx).travados == {0: ("a", 30.0)}
-    # depois o slot passa a mostrar o jogo de 28/10 (Queen, 24/10/2026)
-    semana, ctx = _ctx_falso([25.0, 0.0], T0 + timedelta(days=2, hours=9))
-    ctx.logs["a"].append(SimpleNamespace(data="2026-10-28", fp=25.0))
-    est = semana.estado(ctx)
-    assert est.travados == {0: ("a", 30.0)} and est.pendentes == {}
+    # depois do jogo de 26/10 o "a" foi pro banco; agora voltou
+    semana.registrar_escalacao(2, ["b"], T0 + timedelta(hours=5))
+    assert semana.estado(ctx).travados == {}
 
 
-def test_placar_velho_no_comeco_do_jogo_nao_vira_memoria(monkeypatch):
-    # o 28/10 so comecou: prova a trava agora, mas nao fica guardada
-    import enquete
-    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(days=2, hours=1))
+def test_quem_nao_jogou_escalado_nao_e_pendente(monkeypatch):
+    # o "a" jogou 26/10 no banco e foi posto no slot de noite
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(hours=4))
     monkeypatch.setattr(semana, "respostas", lambda: {})
-    assert semana.estado(ctx).travados == {0: ("a", 30.0)}
-    assert enquete.travados_semana(2) == {}
+    semana.registrar_escalacao(2, ["b"], T0 - timedelta(hours=1))
+    semana.registrar_escalacao(2, ["b"], T0 + timedelta(hours=1))
+    est = semana.estado(ctx)
+    assert est.travados == {} and est.pendentes == {}
+    # escalado o jogo todo: pendente, como sempre
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(hours=4))
+    monkeypatch.setattr(semana, "ESCALACOES", semana.ESCALACOES.with_name("outra.json"))
+    semana.registrar_escalacao(2, ["a", "b"], T0 + timedelta(hours=1))
+    assert semana.estado(ctx).pendentes == {0: ("a", 30.0, "2026-10-26")}
 
 
 def test_enquete_so_pergunta_pendente_firme():
@@ -519,7 +532,7 @@ def test_nao_travei_desfaz_a_semana(monkeypatch, tmp_path):
     monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
     enquete._gravar({"enquetes": {"P1": {"chaves": ["1:a:d2"], "votos": None,
                                          "textos": ["Derik Queen · PF · 20,0 pts"]}},
-                     "respostas": {"1:a:d1": True}, "provados": {"1:a": "d1"}})
+                     "respostas": {"1:a:d1": True}})
     assert enquete.travados_semana(1) == {"a": "d1"}
     ups = {"ok": True, "result": [{"update_id": 9, "message": {"chat": {"id": 42},
                                                                "text": "nao travei queen"}}]}

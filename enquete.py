@@ -16,9 +16,10 @@ mandar uma mensagem pro bot: "travei Queen", "nao travei Wilson" (varios
 separados por virgula, ou "travei todos"). A cada leitura nova o bot
 responde com o que anotou.
 
-Travado nao destrava: o que voce confirmou (ou o placar provou) vale ate o
-fim da semana, mesmo que o confronto mostre outro placar depois. So "nao
-travei Fulano" desfaz.
+Travado nao destrava: o que voce confirmou vale ate o fim da semana, mesmo
+que o confronto mostre outro placar depois. So "nao travei Fulano" desfaz.
+E o "nao" tambem vale: o placar nao prova trava de jogo que voce disse que
+nao travou.
 
 O getUpdates sem offset devolve as ultimas 24h, e nem sempre inteiras (5
 updates numa chamada, 1 na seguinte, 24/10/2026). Reaplicar o voto velho
@@ -50,7 +51,6 @@ def _ler() -> dict:
     d.setdefault("respostas", {})    # "week:pid:data" -> true/false
     d.setdefault("lidas", [])        # update_id das mensagens de texto ja lidas
     d.setdefault("vistos", [])       # pendentes da passada anterior
-    d.setdefault("provados", {})     # "week:pid" -> data do jogo travado (pelo placar)
     return d
 
 
@@ -70,32 +70,22 @@ def perguntadas() -> set[str]:
 
 
 def travados_semana(week: int, votos: dict[str, bool] | None = None) -> dict[str, str]:
-    """{pid: data do jogo} de quem ja travou nesta semana: pelo voto ou pela
-    prova do placar (lembrar).
+    """{pid: data do jogo} de quem voce disse que travou nesta semana.
 
     O slot nao segura o placar travado: o Queen, travado com 20,0 (21/10),
     passou a mostrar 21,5 (23/10) na manha de 24/10, sem jogo no meio. Sem a
-    memoria, o travado virava pendente e ganhava enquete de novo."""
-    d = _ler()
-    votos = d["respostas"] if votos is None else votos
+    memoria, o travado virava pendente e ganhava enquete de novo.
+
+    So o voto, nao o placar: guardar a "prova" do placar travou o KAT a
+    semana inteira (25/10/2026) com 27,0 de 20/10, um jogo em que voce disse
+    que ele NAO travou, e depois do qual ele foi pro banco."""
+    votos = respostas() if votos is None else votos
     out = {}
-    for k, data in d["provados"].items():
-        w, pid = k.split(":", 1)
-        if w == str(week):
-            out[pid] = data
     for k, travou in votos.items():
         w, pid, data = k.split(":", 2)
         if travou and w == str(week):
             out.setdefault(pid, data)
     return out
-
-
-def lembrar(week: int, pid: str, data: str) -> None:
-    """Trava provada pelo placar: fica ate o fim da semana."""
-    d = _ler()
-    if d["provados"].get(f"{week}:{pid}") != data:
-        d["provados"][f"{week}:{pid}"] = data
-        _gravar(d)
 
 
 def firmes(chaves: set[str]) -> set[str]:
@@ -113,7 +103,6 @@ def firmes(chaves: set[str]) -> set[str]:
 def _esquecer(d: dict, chave: str) -> None:
     """"nao travei Fulano": desfaz a trava dele na semana inteira."""
     w, pid = chave.split(":")[:2]
-    d["provados"].pop(f"{w}:{pid}", None)
     for k in d["respostas"]:
         if k.startswith(f"{w}:{pid}:"):
             d["respostas"][k] = False

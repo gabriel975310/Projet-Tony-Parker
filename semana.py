@@ -15,26 +15,33 @@ tres titulares com placar, um so travado). Entao:
     provisorio: vale a enquete (enquete.py). Sem voto, aberto e PENDENTE;
   * placar zero, ou batendo com jogo em andamento -> aberto.
 
-E travado nao destrava: quem ja travou (voto, ou placar velho depois que o
-jogo seguinte ACABOU) fica travado ate domingo, seja la o que o confronto
-mostre depois. Ele mostra outra coisa: o NAW, travado e votado, parecia
-pendente de novo na madrugada de 24/10/2026, e o Queen, travado com 20,0,
-passou a mostrar os 21,5 do jogo seguinte na manha do mesmo dia.
+E o placar do slot mente nos dois sentidos: o Queen, travado com 20,0,
+passou a mostrar os 21,5 do jogo seguinte (24/10/2026), e o KAT, posto no
+C na noite de 24/10, apareceu com os 27,0 de um jogo de 20/10 em que nao
+travou. Entao:
+
+  * quem voce disse que travou fica travado ate domingo (enquete.py);
+  * o placar nao prova trava de jogo em que voce disse que NAO travou;
+  * so trava quem estava escalado no jogo e nao saiu da escalacao depois
+    (travado nao sai do slot). O bot guarda a escalacao que ve a cada
+    passada (escalacoes.json); sem registro do jogo, nao descarta.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from agenda import Jogo, hoje_et
 from clients import CACHE
 from lineup import starting_slots
 from lockin import Opcao, valor_semanal
 from contexte import ativos
-from enquete import lembrar, respostas, travados_semana
+from enquete import respostas, travados_semana
 
 DECISOES = CACHE / "decisoes_trava.json"
+ESCALACOES = CACHE / "escalacoes.json"
 
 
 def decisoes() -> dict:
@@ -51,6 +58,37 @@ def registrar_decisao(week: int, pid: str, data: str, acao: str) -> None:
         DECISOES.write_text(json.dumps(d), encoding="utf-8")
     except OSError as e:
         print(f"(nao gravei a decisao: {e})")
+
+
+def registrar_escalacao(week: int, titulares, agora: datetime) -> list:
+    """Anota os titulares vistos agora. Por semana, uma linha por escalacao
+    diferente: [visto pela primeira vez, visto pela ultima, titulares]."""
+    try:
+        d = json.loads(ESCALACOES.read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    hist = d.setdefault(str(week), [])
+    t, tit = agora.isoformat(), sorted(p for p in titulares if p)
+    if hist and hist[-1][2] == tit:
+        hist[-1][1] = t
+    else:
+        hist.append([t, t, tit])
+    for w in [w for w in d if int(w) < week - 1]:
+        del d[w]
+    try:
+        ESCALACOES.write_text(json.dumps(d), encoding="utf-8")
+    except OSError as e:
+        print(f"(nao gravei a escalacao: {e})")
+    return hist
+
+
+def fora_da_escalacao(hist: list, pid: str, jogo: Jogo) -> bool:
+    """O bot viu o jogador fora dos titulares durante o jogo, ou depois dele.
+    Em qualquer dos dois, ele nao travou aquele jogo (em quadra ninguem sai
+    nem entra; travado nao sai mais). Os 10 minutos sao a folga do tip."""
+    ini = jogo.inicio + timedelta(minutes=10)
+    return any(pid not in tit and datetime.fromisoformat(ate) >= ini
+               for _, ate, tit in hist)
 
 
 @dataclass
@@ -134,6 +172,7 @@ def estado(ctx) -> Estado:
     except Exception as e:
         ctx.warnings.append(f"confronto indisponivel ({e}); assumindo nada travado")
 
+    hist = registrar_escalacao(week, atual, agora)
     votos = respostas()
     ja_travou = travados_semana(week, votos)
     for i in range(len(slots)):
@@ -146,7 +185,9 @@ def estado(ctx) -> Estado:
         if not p or abs(pts) < 1e-9:
             continue
         fins = [j for j in jogos.get(p, []) if j.acabou(agora)]
-        bate = [j for j in fins if abs(placar.get((p, j.data), -999) - pts) < 0.05]
+        bate = [j for j in fins if abs(placar.get((p, j.data), -999) - pts) < 0.05
+                and votos.get(f"{week}:{p}:{j.data}") is not False
+                and not fora_da_escalacao(hist, p, j)]
         if not bate:
             continue      # placar ao vivo ou estatistica atrasada: aberto
         j = bate[-1]
@@ -162,10 +203,6 @@ def estado(ctx) -> Estado:
             est.origem_trava[i] = "enquete"
         else:
             est.origem_trava[i] = j.data
-            # So depois do jogo seguinte ACABAR: no comeco dele o slot ainda
-            # pode estar com o placar velho sem trava nenhuma.
-            if any(x.acabou(agora) for x in jogos.get(p, []) if x.data > j.data):
-                lembrar(week, p, j.data)
         est.travados[i] = (p, pts)
     est.abertos = [i for i in range(len(slots)) if i not in est.travados]
     return est
