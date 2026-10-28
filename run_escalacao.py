@@ -201,7 +201,8 @@ def linhas_travas(ctx, est, decs, ocupa: dict[str, tuple[str, float]] | None = N
         else:
             j = est.ultimo_encerrado(t.pid, ctx.agora)
             de = f" <i>(jogo de {ctx.hora(j.inicio, '%a')})</i>" if j else ""
-            L.append(f"{novo}🔒 <b>TRAVE {nome}</b> no <code>{destino}</code> · "
+            # 👉, nao 🔒: o cadeado fechado e so de quem ja travou (28/10/2026)
+            L.append(f"{novo}👉 <b>TRAVE {nome}</b> no <code>{destino}</code> · "
                      f"<b>{n(t.pontos)}</b> pts{de}")
             # Sem nomes: qualquer um que cabe no slot pode entrar nele; o
             # plano so diz quem provavelmente entra (23/10/2026).
