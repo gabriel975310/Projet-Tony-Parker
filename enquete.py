@@ -224,8 +224,14 @@ def _confirmar(token, chat, anotado, faltou, ajuda) -> None:
     vistos = {}
     for nome, travou in anotado:
         vistos[nome] = travou          # a ultima palavra vale
-    L += [f"{'🔒' if t else '🔓'} {esc(nome)} · {'travado' if t else 'não travado'}"
-          for nome, t in vistos.items()]
+    # 🔓 e 🔒 lado a lado no celular parecem iguais (28/10/2026): o nao
+    # travado vai com ❌, cada grupo numa linha
+    sim = [esc(nome) for nome, t in vistos.items() if t]
+    nao = [esc(nome) for nome, t in vistos.items() if not t]
+    if sim:
+        L.append(f"🔒 <b>travado:</b> {', '.join(sim)}")
+    if nao:
+        L.append(f"❌ <b>não travado:</b> {', '.join(nao)}")
     if faltou:
         L.append(f"❓ <i>não achei na enquete: {esc(', '.join(faltou))}</i>")
     if ajuda:
