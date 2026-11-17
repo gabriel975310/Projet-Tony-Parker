@@ -27,6 +27,15 @@ class Jogo:
     fp: float          # pontos de fantasy pela regra da liga
     min: float
     stats: dict = field(repr=False, default_factory=dict)
+    # minutos do time / 240: 1,0 no tempo normal, 265/240 com uma prorrogacao
+    ot: float = 1.0
+
+    @property
+    def min_reg(self) -> float:
+        """Minutos em 48 de jogo. A prorrogacao infla a minutagem: subida de
+        minutos com 1 OT nos ultimos 5 jogos manteve 60% nos 10 seguintes,
+        com 2 OTs 41-51%, sem OT 69-74% (2024-2025)."""
+        return self.min / self.ot if self.ot > 0 else self.min
 
 
 def _ttl_semana(datas: list[str], hoje: date) -> float:
@@ -58,19 +67,24 @@ def logs(sl, season: int, regras: dict, semanas=None, agenda=None,
         rows = linhas_semana(sl, "stats", season, w, hoje, datas)
         if not rows and semanas is None and w > 3:
             break
+        # O endpoint mistura a linha do TIME (`TEAM_OKC`, 240 minutos e
+        # 160 pontos por jogo) com as dos jogadores. Sem o filtro abaixo o
+        # time virava o melhor jogador da liga; mas os minutos dela dizem se
+        # o jogo teve prorrogacao (265 = uma, 290 = duas).
+        tempo = {(r.get("team"), r.get("date")): minutos(r.get("stats") or {})
+                 for r in rows if str(r.get("player_id") or "").startswith("TEAM_")}
         for r in rows:
-            # O endpoint mistura a linha do TIME (`TEAM_OKC`, 240 minutos e
-            # 160 pontos por jogo) com as dos jogadores. Sem este filtro o
-            # time virava o melhor jogador da liga.
             if not str(r.get("player_id") or "").isdigit():
                 continue
             st = r.get("stats") or {}
             mins = minutos(st)
             if mins <= 0:
                 continue
+            t = tempo.get((r.get("team"), r.get("date"))) or 240.0
             out.setdefault(str(r["player_id"]), []).append(Jogo(
                 r.get("date") or "", r.get("team") or "", r.get("opponent") or "",
-                str(r.get("game_id") or ""), pontos(st, regras), mins, st))
+                str(r.get("game_id") or ""), pontos(st, regras), mins, st,
+                ot=max(1.0, t / 240.0)))
     for v in out.values():
         v.sort(key=lambda j: j.data)
     return out

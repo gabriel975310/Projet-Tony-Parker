@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -486,11 +486,133 @@ def test_quem_nao_jogou_escalado_nao_e_pendente(monkeypatch):
     assert semana.estado(ctx).pendentes == {0: ("a", 30.0, "2026-10-26")}
 
 
-def test_enquete_so_pergunta_pendente_firme():
+def test_enquete_da_noite_inclui_quem_o_placar_ainda_nao_mostra(monkeypatch):
+    # 07/11/2026: o placar do slot aparece jogador por jogador de madrugada,
+    # e cada um ganhava uma enquete. O "b" jogou escalado, o slot dele ainda
+    # mostra 0: entra na mesma enquete que o "a"
+    import run_escalacao
+    semana, ctx = _ctx_falso([30.0, 0.0], T0 + timedelta(hours=4))
+    ctx.logs["b"][0].fp = 12.0
+    monkeypatch.setattr(semana, "respostas", lambda: {})
+    est = semana.estado(ctx)
+    assert est.pendentes == {0: ("a", 30.0, "2026-10-26")}
+    assert run_escalacao.talvez_travados(ctx, est, "2026-10-26") == {
+        0: ("a", 30.0, "2026-10-26"), 1: ("b", 12.0, "2026-10-26")}
+    # quem foi pro banco depois do jogo nao travou: fica fora
+    semana.registrar_escalacao(2, ["a"], T0 + timedelta(hours=5))
+    est = semana.estado(ctx)
+    assert 1 not in run_escalacao.talvez_travados(ctx, est, "2026-10-26")
+
+
+def test_uma_enquete_por_noite(monkeypatch):
     import enquete
-    assert enquete.firmes({"2:a:d", "2:b:d"}) == set()        # primeira vez
-    assert enquete.firmes({"2:a:d"}) == {"2:a:d"}             # o b sumiu
-    assert enquete.firmes({"2:a:d", "2:b:d"}) == {"2:a:d"}    # o b voltou: espera
+    post = SimpleNamespace(ok=True, json=lambda: {"result": {"poll": {"id": "P9"}}})
+    monkeypatch.setattr(enquete.requests, "post", lambda *a, **k: post)
+    cfg = {"telegram": {"bot_token": "t", "chat_id": "c"}}
+    assert not enquete.noite_perguntada("2:2026-11-07")
+    assert enquete.enviar(cfg, "?", [("2:a:2026-11-07", "A · PG · 20 pts")], noite="2:2026-11-07")
+    assert enquete.noite_perguntada("2:2026-11-07")
+    assert not enquete.noite_perguntada("2:2026-11-08")
+
+
+ELENCO_TXT = {"q": ("Derik Queen", [("2026-11-02", 15.0), ("2026-11-05", 20.5)]),
+              "w": ("Caleb Wilson", [("2026-11-04", 11.5)]),
+              "m": ("Tyrese Maxey", [("2026-11-03", 31.0), ("2026-11-07", 28.0)]),
+              "n": ("Nickeil Alexander-Walker", [("2026-11-06", 19.0)])}
+
+
+def _texto(txt, hoje=date(2026, 11, 7)):
+    import enquete
+    d = {"enquetes": {}, "respostas": {}}
+    feitos, faltou = enquete._por_texto(d, txt, ELENCO_TXT, 2, hoje)
+    return [(c, t) for c, _, t, *_ in feitos], faltou
+
+
+def test_mensagem_dias_depois_acha_o_jogo():
+    # 09/11/2026: "travei o Fulano ha 2 dias com 20" e o bot nao entendia
+    assert _texto("Travei o Queen há 2 dias, com 20 pontos") == ([("2:q:2026-11-05", True)], [])
+    assert _texto("eu travei o queen com 20") == ([("2:q:2026-11-05", True)], [])
+    assert _texto("travei maxey terça") == ([("2:m:2026-11-03", True)], [])
+    assert _texto("travei Maxey 03/11") == ([("2:m:2026-11-03", True)], [])
+    assert _texto("o maxey eu travei ontem", date(2026, 11, 8)) == ([("2:m:2026-11-07", True)], [])
+    # sem dia nem placar: o ultimo jogo da semana
+    assert _texto("travei maxey") == ([("2:m:2026-11-07", True)], [])
+    # erro de digitacao e pedaco do sobrenome
+    assert _texto("travei quen e alexander") == (
+        [("2:q:2026-11-05", True), ("2:n:2026-11-06", True)], [])
+    # dois verbos na mesma mensagem
+    assert _texto("travei Queen com 15, não travei Wilson") == (
+        [("2:q:2026-11-02", True), ("2:w:2026-11-04", False)], [])
+
+
+def test_mensagem_que_nao_bate_explica():
+    feitos, faltou = _texto("travei Queen com 30")
+    assert feitos == [] and "não fez 30,0" in faltou[0]
+    feitos, faltou = _texto("travei Wilson sábado")
+    assert feitos == [] and "não jogou" in faltou[0]
+    feitos, faltou = _texto("travei o Fulano")
+    assert feitos == [] and faltou == ["o fulano"]
+    import enquete
+    assert enquete._por_texto({"enquetes": {}}, "bom dia", ELENCO_TXT, 2) is None
+
+
+def test_travar_um_jogo_abre_os_outros_dele(monkeypatch, tmp_path):
+    import enquete
+    monkeypatch.setattr(enquete, "ARQ", tmp_path / "e.json")
+    enquete._gravar({"enquetes": {}, "respostas": {"2:q:2026-11-02": True}})
+    ups = {"ok": True, "result": [{"update_id": 3, "message": {
+        "chat": {"id": 42}, "date": 1762560000, "text": "travei queen com 20,5"}}]}
+    monkeypatch.setattr(enquete.requests, "get",
+                        lambda *a, **k: SimpleNamespace(ok=True, json=lambda: ups))
+    enquete.sincronizar({"telegram": {"bot_token": "t", "chat_id": "42"}},
+                        elenco=ELENCO_TXT, semana=2)
+    assert enquete.travados_semana(2) == {"q": "2026-11-05"}
+
+
+def test_prorrogacao_nao_vira_minuto_novo():
+    from dados import Jogo as JogoLog
+    from modelo import prever_de_log
+    P = {"beta_min": {"organico": 0.6}, "beta_eficiencia": 0.0,
+         "k_prior_jogos": 8, "k_prior_minutos": 250.0}
+    normal = [JogoLog(f"2026-10-{d:02d}", "X", "Y", "", 24.0, 30.0) for d in range(1, 11)]
+    # os dois ultimos com uma prorrogacao (265 minutos do time): 33 minutos
+    # jogados sao os mesmos 30 em 48
+    ot = normal[:8] + [JogoLog(f"2026-10-{d:02d}", "X", "Y", "", 26.4, 33.125, ot=265 / 240)
+                       for d in (9, 10)]
+    assert abs(prever_de_log(ot, P)["min"] - prever_de_log(normal, P)["min"]) < 1e-6
+
+
+def test_log_le_a_prorrogacao_da_linha_do_time():
+    import dados
+    linhas = [{"player_id": "TEAM_DEN", "date": "2026-10-26", "team": "DEN", "stats": {"sp": 265 * 60}},
+              {"player_id": "1", "date": "2026-10-26", "team": "DEN", "opponent": "LAL",
+               "game_id": "g", "stats": {"sp": 40 * 60, "pts": 30}},
+              {"player_id": "2", "date": "2026-10-26", "team": "LAL", "opponent": "DEN",
+               "game_id": "g", "stats": {"sp": 30 * 60, "pts": 10}}]
+    sl = SimpleNamespace(linhas=lambda *a: linhas)
+    L = dados.logs(sl, 2026, {"pts": 1.0}, semanas=[1])
+    assert L["1"][0].ot == 265 / 240 and abs(L["1"][0].min_reg - 40 * 240 / 265) < 1e-9
+    assert L["2"][0].ot == 1.0           # sem linha do LAL: tempo normal
+
+
+def test_subida_com_titular_machucado_ainda_fora_nao_e_ganho_proprio():
+    # o "s" (rotacao, 30 min) jogou os 5 primeiros e se machucou; segue fora,
+    # com status. Antes ele sumia da conta depois do ultimo jogo e a subida
+    # do "r" virava "ganho proprio"
+    from dados import Jogo as JogoLog
+    from modelo import Modelo
+    datas = [f"2026-10-{d:02d}" for d in range(1, 13)]
+    r = [JogoLog(d, "X", "Y", "", 20.0 if k < 7 else 30.0, 20.0 if k < 7 else 30.0)
+         for k, d in enumerate(datas)]
+    s = [JogoLog(d, "X", "Y", "", 30.0, 30.0) for d in datas[:7]]
+    pool = {"r": {"team": "X"}, "s": {"team": "X", "injury_status": "Out", "last_name": "Silva"}}
+    m = Modelo({"r": r, "s": s}, {}, {}, {}, pool)
+    causa, quem = m.explica("r")
+    assert causa == "lesao_segue" and quem == [("s", True)]
+    assert "Silva segue fora" in m.tendencia("r")
+    # sem status (perdeu a vaga e nao voltou): o ganho e dele
+    pool["s"]["injury_status"] = None
+    assert Modelo({"r": r, "s": s}, {}, {}, {}, pool).causa("r") == "organico"
 
 
 def test_escalacao_mexe_o_minimo():

@@ -37,7 +37,7 @@ from run_escalacao import AVISOS as AVISOS_NOITE
 from run_escalacao import (chave_escalacao, em_waiver, escalacao_hoje, linhas_mudancas,
                            linhas_pickups, linhas_plano_dia, linhas_travados, pickups,
                            prazo_mudancas, travas)
-from semana import estado
+from semana import elenco_da_semana, estado
 from trocas import AVISOS as AVISOS_TROCAS
 from trocas import calcular as calcular_trocas
 from trocas import chave_proposta
@@ -101,15 +101,29 @@ def lesao(ctx, pid: str, st: str) -> tuple[str, str]:
     return "🚑", f"{st} · {volta} · perde {perde} jogo{'s' if perde != 1 else ''}"
 
 
-def subindo(ctx, candidatos: list[str], limite: int = 5) -> list[str]:
+def piso_elenco(ctx, est) -> float:
+    """A media do mais fraco do seu elenco ativo, menos 1 ponto: livre abaixo
+    disso nao entra no seu time nem subindo."""
+    mus = [ctx.modelo.base(p)["mu"] for p in est.elenco]
+    return min(mus) - 1.0 if mus else 12.0
+
+
+def subindo(ctx, candidatos: list[str], limite: int = 5, piso: float = 12.0) -> list[str]:
+    """Livres com minutos em alta que podem entrar no seu time.
+
+    Fica de fora quem subiu porque um titular estava fora e ele ja voltou
+    (fica ~52%, contra ~81% do ganho proprio grande): era o Quenton Jackson
+    em 09/11/2026, de volta aos 16 minutos. E quem, mesmo subindo, projeta
+    menos que o pior do seu elenco (`piso`). A ordem e pela media projetada
+    (que ja desconta o que nao deve ficar), nao pelo salto."""
     rows = []
     for p in candidatos:
         b = ctx.modelo.base(p)
-        if b["n"] < 8:
+        if b["n"] < 8 or b["causa"] == "lesao_volta":
             continue
         d = b["R"] - b["B"]
-        if d >= 4 and b["mu"] >= 12:
-            rows.append((d, p))
+        if d >= 4 and b["mu"] >= piso:
+            rows.append((b["mu"], p))
     rows.sort(reverse=True)
     L = []
     for d, p in rows[:limite]:
@@ -260,7 +274,8 @@ def main_with(args, config=None) -> int:
             print(f"[{ctx.rotulo}] relatorio do dia ja saiu")
             return 0
 
-    enquete.sincronizar(ctx.cfg, avisar=not ctx.args.dry_run)
+    enquete.sincronizar(ctx.cfg, avisar=not ctx.args.dry_run,
+                        elenco=elenco_da_semana(ctx), semana=ctx.week)
     est = estado(ctx)
     if not est.elenco:
         # Antes do draft o elenco e vazio e todo livre "melhora o time".
@@ -291,7 +306,7 @@ def main_with(args, config=None) -> int:
     ontem = (date.fromisoformat(hoje_et(ctx.agora)) - timedelta(days=1)).isoformat()
     if not ja_avisado(AVISOS_NOITE, f"noite:{ontem}"):
         L += relatorio_waiver(ctx, est, abertos, congelados, usados)
-    sub = subindo(ctx, fa)
+    sub = subindo(ctx, fa, piso=piso_elenco(ctx, est))
     if sub:
         L += secao("📈", "Livres subindo de papel")
         L += sub

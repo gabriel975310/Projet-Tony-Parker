@@ -50,8 +50,8 @@ from contexte import base_parser, build, ja_avisado, marcar_avisado, run_for_eac
 import enquete
 from report import bloco, n, rodape, secao, titulo
 from previsao_waiver import VIES_LIVRE
-from semana import (decisoes, estado, jogos_hoje, opcoes_futuras, registrar_decisao,
-                    semanas_horizonte, valor_temporada)
+from semana import (decisoes, elenco_da_semana, estado, fora_da_escalacao, jogos_hoje,
+                    opcoes_futuras, registrar_decisao, semanas_horizonte, valor_temporada)
 
 AVISOS = CACHE / "escalacao_avisos.json"
 
@@ -726,22 +726,48 @@ def recentes(ctx, est, decs):
     return out
 
 
-def mandar_enquete(ctx, est, decs, ate: str) -> None:
-    """Pergunta quem dos talvez-travados voce travou: uma enquete so, depois
-    que a rodada daquele jogo fechou (`ate`: a ultima noite fechada) e a
-    mensagem do fim da noite saiu, e uma vez por jogo."""
+def talvez_travados(ctx, est, ate: str) -> dict[int, tuple[str, float, str]]:
+    """{slot: (jogador, placar, data)} de todo titular de slot aberto cujo
+    ultimo jogo (ate a noite `ate`) acabou, sem voto e sem o proximo jogo
+    comecado: quem pode ter travado.
+
+    Os pendentes do confronto e mais quem jogou escalado mas o placar do
+    slot ainda nao bate: a lista sai do log e da escalacao, nao do placar
+    do Sleeper, que aparece jogador por jogador de madrugada."""
+    votos = enquete.respostas()
+    out = {i: v for i, v in est.pendentes.items() if v[2] <= ate}
+    for i in est.abertos:
+        p = est.atual[i]
+        if i in out or not p:
+            continue
+        j = est.ultimo_encerrado(p, ctx.agora)
+        if not j or j.data > ate or (p, j.data) not in est.placar:
+            continue      # sem jogo, ou nao entrou em quadra (DNP)
+        if any(x.comecou(ctx.agora) for x in est.jogos.get(p, []) if x.data > j.data):
+            continue
+        if f"{est.week}:{p}:{j.data}" in votos or fora_da_escalacao(est.hist, p, j):
+            continue
+        out[i] = (p, est.placar[(p, j.data)], j.data)
+    return out
+
+
+def mandar_enquete(ctx, est, decs, dia_noite: str, fechada: bool) -> None:
+    """Pergunta quem dos talvez-travados voce travou: UMA enquete por noite,
+    quando a rodada fecha, com todo mundo que jogou (e quem ficou de noites
+    anteriores sem pergunta). Quem aparecer depois dela espera a enquete da
+    noite seguinte; a qualquer hora vale mandar "travei Fulano"."""
+    noite = f"{est.week}:{dia_noite}"
+    if not fechada or enquete.noite_perguntada(noite):
+        return
     ja = enquete.perguntadas()
     dec = decisoes()
     agora = {t.pid: ("SEGURAR" if t.segurar else "TRAVAR" if t.travar else "PASSAR")
              for t in decs}
     ordem = {"travar": 3, "segurar": 2, None: 1, "passar": 0}
-    # so quem ja estava pendente na passada anterior (15-30 min antes)
-    firmes = enquete.firmes({f"{est.week}:{p}:{data}" for p, _, data in est.pendentes.values()
-                             if data <= ate})
     itens = []
-    for i, (p, pts, data) in est.pendentes.items():
+    for i, (p, pts, data) in talvez_travados(ctx, est, dia_noite).items():
         chave = f"{est.week}:{p}:{data}"
-        if chave not in firmes or chave in ja:
+        if chave in ja:
             continue
         antes = dec.get(chave)
         if antes:
@@ -751,19 +777,22 @@ def mandar_enquete(ctx, est, decs, ate: str) -> None:
         else:
             rec = "sem recomendação"
         chance = ordem.get(antes or (agora.get(p) or "").lower() or None, 1)
+        # sobra de noite anterior leva o dia do jogo
+        dia = "" if data == dia_noite else f" · jogo de {enquete._dia(data)}"
         itens.append((chance, pts, chave,
-                      f"{ctx.name(p)} · {est.slots[i]} · {n(pts)} pts · {rec}"))
+                      f"{ctx.name(p)} · {est.slots[i]} · {n(pts)} pts{dia} · {rec}"))
     if not itens:
         return
     itens.sort(key=lambda x: (-x[0], -x[1]))
-    pergunta = (f"Semana {est.week}: quem destes você TRAVOU? O Sleeper não me mostra "
-                f"até o próximo jogo deles. Marque todos (ou '{enquete.NENHUM}').")
+    pergunta = (f"Semana {est.week}, jogos de {enquete._dia(dia_noite)}: quem destes você "
+                f"TRAVOU? O Sleeper não me mostra até o próximo jogo deles. "
+                f"Marque todos (ou '{enquete.NENHUM}').")
     if ctx.args.dry_run:
         print("\n(enquete, dry-run: nao enviada)\n" + pergunta)
         for *_, t in itens:
             print(f"  [ ] {t}")
         return
-    if enquete.enviar(ctx.cfg, pergunta, [(c, t) for *_, c, t in itens]):
+    if enquete.enviar(ctx.cfg, pergunta, [(c, t) for *_, c, t in itens], noite=noite):
         print(f"[{ctx.rotulo}] enquete de trava: {len(itens)} jogador(es)")
 
 
@@ -809,7 +838,8 @@ def main_with(args, config=None) -> int:
     if not ctx.sl.lock_in():
         ctx.warnings.append("esta liga NAO esta no modo Lock-In; a logica de trava nao se aplica")
     registrar_status(ctx)
-    enquete.sincronizar(ctx.cfg, avisar=not ctx.args.dry_run)
+    enquete.sincronizar(ctx.cfg, avisar=not ctx.args.dry_run,
+                        elenco=elenco_da_semana(ctx), semana=ctx.week)
     est = estado(ctx)
     if not est.elenco:
         # Antes do draft o elenco e vazio e todo livre "melhora o time".
@@ -832,7 +862,9 @@ def main_with(args, config=None) -> int:
     fechada = noite_fechada(ctx, jogos_noite)
     chave_noite = f"noite:{dia_noite}"
     manda_noite = fechada and (not gate or not ja_avisado(AVISOS, chave_noite))
-    ate = dia_noite if fechada else (date.fromisoformat(dia_noite) - timedelta(days=1)).isoformat()
+    # a enquete sai depois da mensagem do fim da noite
+    pergunta = lambda: mandar_enquete(ctx, est, decs, dia_noite,
+                                      fechada and (not gate or ja_avisado(AVISOS, chave_noite)))
 
     chaves_trava = {}
     for t in decs:
@@ -871,7 +903,7 @@ def main_with(args, config=None) -> int:
         print(f"[{ctx.rotulo}] nada novo a decidir "
               f"(travados {len(est.travados)}/{len(est.slots)}, {len(novos)} trava(s) "
               f"esperando o fim da noite, proximo tip {ctx.hora(proximo_tip)})")
-        mandar_enquete(ctx, est, decs, ate)
+        pergunta()
         return 0
 
     tipo = ("FIM DA NOITE" if manda_noite else "LEMBRETE"
@@ -926,7 +958,7 @@ def main_with(args, config=None) -> int:
             marcar_avisado(AVISOS, f"add:{est.hoje}:{r['add']}:{r['drop']}")
         if manda_noite:
             marcar_avisado(AVISOS, chave_noite)
-    mandar_enquete(ctx, est, decs, ate)
+    pergunta()
     return 0
 
 

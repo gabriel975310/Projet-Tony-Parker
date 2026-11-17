@@ -110,6 +110,8 @@ class Estado:
     # pontos de cada jogador no confronto (`players_points`): durante o jogo,
     # o placar ao vivo
     pontos_conf: dict[str, float] = field(default_factory=dict)
+    # as escalacoes vistas na semana (registrar_escalacao)
+    hist: list = field(default_factory=list)
 
     def usados(self) -> set[str]:
         return {p for p, _ in self.travados.values()}
@@ -173,6 +175,7 @@ def estado(ctx) -> Estado:
         ctx.warnings.append(f"confronto indisponivel ({e}); assumindo nada travado")
 
     hist = registrar_escalacao(week, atual, agora)
+    est.hist = hist
     votos = respostas()
     ja_travou = travados_semana(week, votos)
     for i in range(len(slots)):
@@ -206,6 +209,18 @@ def estado(ctx) -> Estado:
         est.travados[i] = (p, pts)
     est.abertos = [i for i in range(len(slots)) if i not in est.travados]
     return est
+
+
+def elenco_da_semana(ctx) -> dict[str, tuple[str, list[tuple[str, float]]]]:
+    """{pid: (nome, [(data, pontos)] dos jogos ja jogados na semana)}: com
+    isso a mensagem "travei Queen ha 2 dias com 20" acha o jogo certo."""
+    try:
+        roster = ctx.sl.my_roster()
+        datas = set(ctx.agenda.datas_da_semana(ctx.week))
+    except Exception:
+        return {}
+    return {p: (ctx.name(p), [(j.data, j.fp) for j in ctx.logs.get(p, []) if j.data in datas])
+            for p in roster.get("players") or []}
 
 
 def opcao(ctx, pid: str, jogo: Jogo) -> Opcao:

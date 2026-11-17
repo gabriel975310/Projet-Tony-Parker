@@ -152,6 +152,10 @@ def _media(xs):
     return sum(xs) / len(xs) if xs else 0.0
 
 
+def _min48(j) -> float:
+    return getattr(j, "min_reg", j.min)
+
+
 def prever_de_log(prior: list, P: dict, causa: str = "organico",
                   prior_min: float | None = None,
                   prior_taxa: float | None = None) -> dict:
@@ -165,8 +169,10 @@ def prever_de_log(prior: list, P: dict, causa: str = "organico",
         m, t = prior_min or 0.0, prior_taxa or 0.0
         return {"mu": m * t, "min": m, "taxa": t, "B": m, "R": m, "Br": t, "Rr": t}
     base, rec = (prior[:-JANELA], prior[-JANELA:]) if len(prior) > JANELA else (prior, prior)
-    B = _media([j.min for j in base])
-    R = _media([j.min for j in rec])
+    # Minutos em 48 de jogo: 40 numa prorrogacao nao e papel novo. A
+    # eficiencia (pontos por minuto) fica com o minuto jogado mesmo.
+    B = _media([_min48(j) for j in base])
+    R = _media([_min48(j) for j in rec])
     bm = sum(j.min for j in base)
     Br = sum(j.fp for j in base) / bm if bm else 0.0
     rm = sum(j.min for j in rec)
@@ -227,6 +233,7 @@ class Modelo:
         self._idx = None
         self.P = P or carregar_params()
         self._base: dict[str, dict] = {}
+        self._explica: dict[str, tuple] = {}
         self._horiz: dict[str, float | None] = {}
         self._vagos = None
 
@@ -237,7 +244,7 @@ class Modelo:
             self._vagos = {}
             for pid, js in self.logs.items():
                 p = self.pool.get(pid) or {}
-                if not js or p.get("injury_status") not in FORA:
+                if not js or self.status(pid) not in FORA:
                     continue
                 m = _media([j.min for j in js])
                 if len(js) >= 5 and m >= ROTACAO:
@@ -265,28 +272,59 @@ class Modelo:
         return self._por_time
 
     def causa(self, pid: str) -> str:
-        """Mesma classe do backtest, mas com o que se sabe AGORA: quem da
-        rotacao do time esta fora pelo relatorio de lesao."""
+        return self.explica(pid)[0]
+
+    def explica(self, pid: str) -> tuple[str, list[tuple[str, bool]]]:
+        """(causa, [(colega cuja falta abriu os minutos, ainda fora?)]).
+
+        Mesma classe do backtest, mas com o que se sabe AGORA: quem da
+        rotacao do time esta fora pelo relatorio de lesao.
+
+        Colega conta como fora no jogo do time que ele nao jogou, depois da
+        estreia, se ele voltou a jogar depois OU se ainda esta no time com
+        status de lesao. O backtest conta ate o ultimo jogo dele no ano
+        INTEIRO (sabe que ele volta); contar so ate o ultimo jogo ate aqui
+        sumia com quem se machucou e segue fora, e a subida virava "ganho
+        proprio, fica 81%" (09/11/2026). Quem saiu do time, ou perdeu a vaga
+        sem lesao e nao voltou, nao conta: ai o ganho e dele mesmo.
+        """
+        if pid in self._explica:
+            return self._explica[pid]
+        self._explica[pid] = ("organico", [])
         js = self.logs.get(pid) or []
         if len(js) < JANELA + 3:
-            return "organico"
+            return self._explica[pid]
         time = js[-1].team
         rot = {q: v for q, v in self._times()[1].get(time, {}).items() if q != pid}
+        no_time = {q for q in rot if (self.pool.get(q) or {}).get("team") == time
+                   and self.status(q)}
+
+        def fora(q, d):
+            m, dq, ult = rot[q]
+            return d not in dq and min(dq) < d and (d <= ult or q in no_time)
 
         def vago(ds):
             ds = list(ds)
             if not ds:
                 return 0.0
-            return sum(sum(m for (m, dq, ult) in rot.values()
-                           if d not in dq and d <= ult) for d in ds) / len(ds)
+            return sum(sum(rot[q][0] for q in rot if fora(q, d)) for d in ds) / len(ds)
         # Variacao, nao nivel: o que ficou vago A MAIS na janela recente em
         # relacao a base dele (backtest_momentum.py explica o porque).
-        v_base = vago(j.data for j in js[:-JANELA] if j.team == time)
-        v_rec = vago(j.data for j in js[-JANELA:]) - v_base
+        base = [j.data for j in js[:-JANELA] if j.team == time]
+        rec = [j.data for j in js[-JANELA:]]
+        v_base = vago(base)
+        v_rec = vago(rec) - v_base
         if v_rec < LIMIAR_VAGO:
-            return "organico"
+            return self._explica[pid]
         v_agora = self._rotacao_fora().get(time, 0.0) - v_base
-        return "lesao_segue" if v_agora >= 0.6 * v_rec else "lesao_volta"
+        c = "lesao_segue" if v_agora >= 0.6 * v_rec else "lesao_volta"
+        # quem mais abriu minutos: os da rotacao que faltaram mais na janela
+        # recente que na base, pesados pelos minutos deles
+        frac = lambda q, ds: sum(fora(q, d) for d in ds) / len(ds) if ds else 0.0
+        peso = {q: rot[q][0] * (frac(q, rec) - frac(q, base)) for q in rot}
+        quem = sorted((q for q in rot if peso[q] >= 0.25 * LIMIAR_VAGO), key=lambda q: -peso[q])
+        self._explica[pid] = (c, [(q, self.status(q) in FORA) for q in quem])
+        return self._explica[pid]
 
     # -- previsao ------------------------------------------------------------
     def _priors(self, pid: str) -> tuple[float | None, float | None]:
@@ -480,9 +518,35 @@ class Modelo:
         faixa = pc.get("subiu6_fica") if d >= 6 else pc.get("caiu6_fica") if d <= -6 else None
         if faixa is not None and faixa == faixa:
             beta = faixa
-        porque = {"organico": "ganho proprio",
+        porque = {"organico": "ganho próprio",
                   "lesao_segue": "titular do time segue fora",
                   "lesao_volta": "titular do time voltou"}[b["causa"]]
+        _, quem = self.explica(pid)
+        if quem and d > 0:
+            # quem abriu os minutos, e se ele ja voltou: e isso que diz se fica
+            fora = [self._nome(q) + self._volta(q) for q, f in quem if f]
+            voltou = [self._nome(q) for q, f in quem if not f]
+            partes = []
+            if fora:
+                partes.append(f"{' e '.join(fora[:2])} segue{'m' if len(fora) > 1 else ''} fora")
+            if voltou:
+                partes.append(f"{' e '.join(voltou[:2])} já voltou" if len(voltou) == 1
+                              else f"{' e '.join(voltou[:2])} já voltaram")
+            porque = "; ".join(partes)
+        if d < 0:
+            # a classe de causa e de quem SOBE; na queda ela nao explica nada
+            porque = "a queda"
         seta = "subindo" if d > 0 else "caindo"
-        return (f"minutos {seta} {d:+.0f} ({b['B']:.0f}→{b['R']:.0f}); "
-                f"{porque}, fica ~{beta:.0%}")
+        ot = sum(1 for j in (self.logs.get(pid) or [])[-JANELA:] if getattr(j, "ot", 1.0) > 1.01)
+        nota_ot = f" · {ot} prorrogaç{'ões' if ot > 1 else 'ão'} descontada{'s' if ot > 1 else ''}" if ot else ""
+        sep = " " if d < 0 else ", "
+        return (f"minutos {seta} {d:+.0f} ({b['B']:.0f}→{b['R']:.0f}){nota_ot}; "
+                f"{porque}{sep}fica ~{beta:.0%}")
+
+    def _nome(self, q: str) -> str:
+        p = self.pool.get(q) or {}
+        return p.get("last_name") or p.get("full_name") or q
+
+    def _volta(self, q: str) -> str:
+        ret = ((self.lesoes.get(q) or {}).get("retorno") or "")[:10]
+        return f" (volta {ret[8:10]}/{ret[5:7]})" if ret else ""
